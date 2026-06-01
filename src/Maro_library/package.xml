@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+	<name>maro_library</name>
+	<version>0.0.1</version>
+	<description>Lightweight ROS2 to OpenCV image bridge library for Maro</description>
+	<maintainer email="user@todo.todo">User</maintainer>
+	<license>Apache-2.0</license>
+
+	<buildtool_depend>ament_cmake</buildtool_depend>
+
+	<depend>rclcpp</depend>
+	<depend>sensor_msgs</depend>
+	<depend>std_msgs</depend>
+	<!-- OpenCV 의존성은 CMakeLists.txt의 find_package(OpenCV)를 통해 처리되므로 이 라인은 삭제하는 것이 더 명확합니다. -->
+	<!-- <depend>libopencv-dev</depend> -->
+
+	<export>
+		<build_type>ament_cmake</build_type>
+	</export>
+</package>

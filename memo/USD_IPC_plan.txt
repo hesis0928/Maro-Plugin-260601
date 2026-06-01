@@ -1,0 +1,211 @@
+Maya - ROS2 투 트랙 하이브리드 아키텍처 개발 플랜
+
+이 설계는 저용량/구조적 데이터(Track A)와 초고용량/센서 데이터(Track B)의 처리 경로를 완전히 분리하여, 
+디지털 트윈 시스템의 고질적인 병목 현상을 해결하는 차세대 파이프라인입니다. 
+두 거대한 시스템(Maya, ROS2)을 한 프로세스에 묶지 않고 분리하여 안정성과 퍼포먼스를 극대화합니다.
+
+1. 하이브리드 아키텍처 프로세스 도식화
+
+graph TD
+    subgraph "Process 1: Autodesk Maya (C++ Plugin)"
+        UI[Maya UI / Viewport]
+        DG[Maya DG Node\n(Kinematics, State)]
+        RENDER[Maya Render Engine\n(Viewport 2.0 / Hardware)]
+        
+        UI --- DG
+        UI --- RENDER
+        
+        subgraph "Track A: USD Exporter (Sync)"
+            USD_OUT[OpenUSD API\nDelta Sync]
+        end
+        
+        subgraph "Track B: IPC Writer (Async)"
+            SHM_W[Shared Memory Writer\n(Mutex/Semaphore)]
+        end
+        
+        DG -->|Joints, Transforms| USD_OUT
+        RENDER -->|Raw Pixels, Depth| SHM_W
+    end
+
+    subgraph "Data Highway (OS / File System)"
+        USD_CORE[(USD Stage / Nucleus)]
+        SHM_CORE[("OS Shared Memory\n(Zero-copy Buffer)")]
+        
+        USD_OUT == "State Sync" ==> USD_CORE
+        SHM_W == "High-Bandwidth\nMemory Map" ==> SHM_CORE
+    end
+
+    subgraph "Process 2: ROS2 Bridge (Standalone C++)"
+        subgraph "Track A: USD Listener"
+            USD_IN[OpenUSD API\nNotice Listener]
+        end
+        
+        subgraph "Track B: IPC Reader"
+            SHM_R[Shared Memory Reader]
+        end
+        
+        USD_CORE == "Delta Update" ==> USD_IN
+        SHM_CORE == "Signal Trigger" ==> SHM_R
+        
+        ROS_NODE[ROS2 Bridge Node]
+        USD_IN -->|Convert to TF/JointState| ROS_NODE
+        SHM_R -->|Convert to Image/PointCloud| ROS_NODE
+    end
+
+    subgraph "ROS2 DDS Network"
+        TOPIC_A((/tf, /joint_states))
+        TOPIC_B((/camera/image_raw, /lidar))
+        
+        ROS_NODE --> TOPIC_A
+        ROS_NODE --> TOPIC_B
+    end
+
+    classDef maya fill:#1e3d59,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef ros fill:#22b455,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef highway fill:#ff6e40,stroke:#fff,stroke-width:2px,color:#fff;
+    
+    class UI,DG,RENDER,USD_OUT,SHM_W maya;
+    class USD_IN,SHM_R,ROS_NODE ros;
+    class USD_CORE,SHM_CORE highway;
+
+
+2. 데이터 파이프라인 상세 설계
+
+Track A: USD 기반 상태 동기화 (Low-Bandwidth, High-Structure)
+
+담당 데이터: 로봇의 관절 각도(Joint States), 위치(Transform), 씬의 계층 구조, 메터리얼 변경 사항 등.
+
+파이프라인 흐름:
+
+Maya에서 사용자가 로봇 팔을 제어하거나 스크립트를 통해 애니메이션이 발생합니다.
+
+Maya C++ 플러그인이 OpenUSD API를 호출하여 변경된 속성(Delta)만 메모리 상의 USD Stage에 기록합니다.
+
+외부에서 독립적으로 실행 중인 ROS2 Bridge 프로세스가 USD의 변경 알림 이벤트(TfNotice)를 수신합니다.
+
+Bridge가 변경된 값을 읽어 ROS2의 sensor_msgs/JointState 또는 tf2_msgs/TFMessage 형식으로 변환 후 퍼블리시합니다.
+
+Track B: 공유 메모리 기반 센서 스트리밍 (High-Bandwidth, Zero-Copy)
+
+담당 데이터: 카메라 렌더링 버퍼(RGB/Depth), 라이다(LiDAR) 포인트 클라우드 등 초당 수십~수백 MB의 무거운 센서 로우(Raw) 데이터.
+
+파이프라인 흐름:
+
+Maya 플러그인이 Viewport 2.0 API(MDrawContext 또는 MRenderTarget)를 후킹하여 렌더링이 끝난 프레임 버퍼(Raw Pixels)를 가로챕니다.
+
+OS 레벨에서 미리 할당해 둔 공유 메모리(Shared Memory) 공간에 픽셀 배열을 직접 복사(Memcpy)하고, 세마포어(Semaphore) 신호로 락을 해제합니다.
+
+세마포어를 대기 중이던 ROS2 Bridge 프로세스가 신호를 받고 공유 메모리 주소에서 데이터를 즉시 매핑하여 읽어옵니다. (Zero-copy)
+
+ROS2 sensor_msgs/Image 구조체에 데이터를 담아 퍼블리시합니다.
+
+3. 핵심 기술 스택
+
+분류
+
+기술 및 라이브러리
+
+적용 목적 및 용도
+
+핵심 언어
+
+C++17 / C++20
+
+Maya 플러그인 및 ROS2 브릿지의 고성능 코어 로직 구현
+
+3D 그래픽스 API
+
+Maya C++ API (OpenMaya, OpenMayaRender)
+
+DG Node 연산, 뷰포트 렌더링 버퍼 접근 및 추출
+
+데이터 구조 표준
+
+OpenUSD (Universal Scene Description)
+
+씬 계층 구조 관리 및 다중 프로세스 간 상태(State) 실시간 동기화
+
+메모리/통신 제어
+
+Boost.Interprocess 또는 OS Native (POSIX/WinAPI)
+
+Track B의 공유 메모리 할당 및 스레드/프로세스 간 동기화(Mutex) 제어
+
+로보틱스 미들웨어
+
+ROS2 (Humble 또는 Jazzy) + rclcpp
+
+독립된 C++ 프로세스에서 ROS2 Node 실행 및 DDS 네트워크 통신
+
+빌드 및 배포
+
+CMake
+
+Maya 플러그인(mll/so)과 ROS2 브릿지(exe/elf)의 독립적 빌드 관리
+
+4. 최종 개발 플랜 (투 트랙 아키텍처, A-Z 정렬)
+
+---
+
+*   **A. Architecture Redefinition (아키텍처 재정의)**
+    *   **내용**: 기존의 단일 프로세스 모델을 폐기하고, Maya 플러그인과 독립적인 ROS 2 브릿지(Bridge)가 공유 메모리(Track B)와 USD(Track A)를 통해 통신하는 투 트랙 아키텍처를 최종 설계로 확정합니다.
+
+*   **B. Build Environment Setup (빌드 환경 구축)**
+    *   **내용**: **두 개의 독립된 CMake 프로젝트**를 구성합니다.
+        1.  **Maya 플러그인용**: Maya Devkit과 `Boost.Interprocess`만 링크하는 가벼운 프로젝트.
+        2.  **ROS 2 브릿지용**: `rclcpp`, `OpenUSD`, `Boost.Interprocess`, `OpenCV`를 모두 링크하는 독립 실행 파일 프로젝트.
+    *   **(완료)** 이 단계는 성공적으로 완료되었습니다.
+
+*   **C. Component & Rigging Preparation (3D 모델 표준화)**
+    *   **내용**: Maya 씬의 로봇 모델이 USD 스켈레톤(Skel) 스키마와 호환되도록 조인트 계층 구조와 이름을 표준화합니다.
+
+*   **D. Data Structure Definition (데이터 구조 매핑)**
+    *   **내용**: Maya 조인트의 `rotate` 속성과 USD Skel의 `joint:rotations` 속성, 그리고 ROS 2 `sensor_msgs/JointState` 메시지 간의 데이터 매핑 관계를 정의합니다.
+
+*   **F. Foundation of IPC Writer (IPC Writer 모듈 구현)**
+    *   **내용**: Maya C++ 플러그인 내부에 `M3dView::readColorBuffer`를 통해 뷰포트 픽셀을 읽고, `Boost.Interprocess`를 사용해 공유 메모리에 쓰는 로직(`ViewportStreamer` 클래스)을 구현합니다.
+    *   **(완료)** 이 단계 역시 완료되었습니다.
+
+*   **G. Generated Attributes to USD (Maya -> USD 데이터 쓰기)**
+    *   **내용**: Maya 플러그인에 `OpenUSD` 라이브러리를 연동합니다. `MDGMessage` 콜백을 사용하여 조인트 값 변경을 감지하고, 변경된 값(Delta)만 USD Stage에 기록하는 로직을 구현합니다.
+
+*   **H. Hardware & Coordinate Math Design (좌표계 변환)**
+    *   **내용**: Maya(Y-up)와 ROS(Z-up) 간의 불일치를 해결하기 위해, USD에서 값을 읽거나 쓸 때 필요한 쿼터니언 또는 회전 행렬 변환 로직을 구현합니다.
+
+*   **I. Initialization of ROS2 Bridge (ROS 2 브릿지 노드 초기화)**
+    *   **내용**: Phase 1에서 만든 `shm_reader` 프로젝트에 `rclcpp`를 연동하여, 독립적으로 실행되는 ROS 2 노드로 전환합니다.
+
+*   **J. Joint State Listener in Bridge (브릿지 <- USD 데이터 읽기)**
+    *   **내용**: ROS 2 브릿지 프로세스에 `OpenUSD`를 연동하고, USD Stage의 변경 사항을 감지하는 이벤트 리스너(`TfNotice`)를 등록합니다. 변경된 조인트 값을 읽어 `sensor_msgs/JointState` 메시지로 변환하여 발행하는 로직을 구현합니다.
+
+*   **K. Kernel Threading Strategy (브릿지 내 멀티스레딩)**
+    *   **내용**: ROS 2 브릿지 프로세스 내에서, Track A(USD 리스너)와 Track B(공유 메모리 리더)가 서로를 방해하지 않고 동시에 동작하도록 각각을 별도의 `std::thread`로 분리합니다.
+
+*   **L. Locking & Synchronization (잠금 및 동기화 로직 구현)**
+    *   **내용**: `boost::interprocess::named_mutex`를 사용하여 프로세스 간 데이터 경쟁 상태를 방지하고, `frame_index` 카운터를 도입하여 Reader가 중복 프레임을 처리하지 않도록 동기화 로직을 완성합니다.
+    *   **(완료)** 이 단계 역시 완료되었습니다.
+
+*   **P. Performance & QoS Tuning (성능 및 QoS 튜닝)**
+    *   **내용**: 대용량 이미지 데이터 전송에 적합하도록 ROS 2의 QoS 프로파일을 `Best Effort`로 설정하고, 필요한 경우 `Loaned Messages`를 활용한 제로카피(Zero-copy) 전송을 도입하여 60fps 이상의 고성능 스트리밍을 목표로 최적화합니다.
+
+*   **R. Rigging Automation Scripting (자동화 스크립트 작성)**
+    *   **내용**: 사용자가 복잡한 과정을 거치지 않고 "Maya에서 스트리밍 시작 -> 터미널에서 브릿지 실행" 두 단계만으로 시스템을 구동할 수 있도록, 간단한 셸 스크립트나 Python 실행 스크립트를 작성합니다.
+
+*   **S. Safe Teardown & Resource Yielding (안전한 자원 해제)**
+    *   **내용**: Maya나 브릿지 프로세스가 종료될 때 데드락이나 좀비 프로세스가 남지 않도록, 공유 메모리, 뮤텍스, 스레드, ROS 2 컨텍스트가 정해진 순서에 따라 안전하게 종료(Graceful Shutdown)되는 로직을 철저히 구현합니다.
+
+*   **T. Testing Execution - Standalone Reader (독립 리더 테스트)**
+    *   **내용**: ROS 2가 포함되지 않은 순수 C++ 콘솔 앱(`shm_reader`)을 만들어, 공유 메모리에서 이미지 데이터를 읽고 OpenCV로 화면에 표시하는 PoC를 진행합니다.
+    *   **(완료)** 이 단계 역시 성공적으로 검증되었습니다.
+
+*   **V. Verification with RViz (RViz 연동 검증)**
+    *   **내용**: ROS 2의 표준 시각화 도구인 `rqt_image_view`나 `RViz2`를 실행하여, Maya 뷰포트 화면이 ROS 2 네트워크를 통해 실시간으로 스트리밍되는지 최종 검증합니다.
+
+*   **X. eXpansion for Publishing (이미지 토픽 발행 기능 확장)**
+    *   **내용**: 공유 메모리에서 읽은 `cv::Mat` 데이터를 ROS 2 표준 이미지 메시지(`sensor_msgs::msg::Image`)로 변환하고, `/camera/image_raw`와 같은 토픽으로 발행(Publish)하는 로직을 구현합니다.
+
+*   **Y. YAML/Config Externalization (설정 외재화)**
+    *   **내용**: 공유 메모리 이름, ROS 토픽 이름, 조인트 매핑 정보 등을 외부 설정 파일(YAML 등)로 분리하여 코드 수정 없이 시스템의 동작을 변경할 수 있도록 유연성을 확보합니다.
+
+*   **Z. Zero-Defect Finalization (최종 디버깅 및 문서화)**
+    *   **내용**: 전체 시스템의 안정성을 최종 점검하고, GitHub 리포지토리에 아키텍처 다이어그램, 벤치마크 결과, 데모 GIF/동영상, 상세한 사용법을 포함한 고품질의 `README.md`를 작성하여 프로젝트를 완성합니다.

@@ -1,0 +1,55 @@
+﻿8. 🛠️ 실무 관점에서의 고려 사항 및 개선 방향 (Pro-Level Upgrades)
+
+현재 코드는 "작동하는 프로토타입" 수준입니다. 실제 상용 플러그인이나 큰 규모의 프로젝트에 적용하기 위해 반드시 고려해야 할 실무적 개선 방향 4가지를 제시합니다.
+
+① 전역 변수(Global Variables)의 캡슐화
+
+현재 문제: timerCallbackId, targetAngle, rosNode 등이 파일 전체의 전역 변수로 선언되어 있습니다. 이는 플러그인이 복잡해지면 이름이 충돌하거나 엉뚱한 곳에서 값이 수정되는 치명적인 버그(Side Effect)를 낳습니다.
+
+개선 방향: 싱글톤(Singleton) 패턴의 관리자(Manager) 클래스를 만들거나, 변수들을 구조체나 특정 클래스 내부에 숨겨(Encapsulation) 외부 접근을 차단해야 합니다.
+
+② 성능 최적화: 매 프레임마다 선택 객체 찾기 (Polling) 제거
+
+현재 문제: 타이머 콜백(myTimerCallback)이 0.03초마다 실행될 때마다 MGlobal::getActiveSelectionList를 호출해 마야 씬(Scene) 전체에서 현재 선택된 객체를 찾습니다. 객체가 많아질수록 마야가 버벅거리는 프레임 드랍(Frame Drop)의 원인이 됩니다.
+
+개선 방향: rosSim 명령어를 처음 켤 때(doIt) 선택된 객체의 경로(MDagPath)를 전역 변수나 싱글톤 객체에 한 번만 저장(캐싱)해두고, 콜백에서는 저장된 객체만 바로 회전시키도록 해야 합니다.
+
+③ 예외 처리 및 타입 안정성 (Robustness) 보강
+
+현재 문제: slist.getDagPath(0, dagPath) 이후 바로 MFnTransform transFn(dagPath)를 덮어씌웁니다. 만약 사용자가 회전할 수 없는 객체(예: 카메라 렌즈, 라이트, 메시 데이터 자체 등)를 선택했다면 플러그인이 튕기거나(Crash) 에러를 뿜을 수 있습니다.
+
+개선 방향: dagPath.hasFn(MFn::kTransform)을 사용해 현재 선택된 객체가 정말로 '회전이 가능한 트랜스폼 노드'인지 검사하는 안전장치(if문)가 반드시 필요합니다.
+
+④ 하드코딩(Hard-coding) 제거와 확장성 확보
+
+현재 문제: 토픽 이름("/joint_angle")과 업데이트 주기(0.03)가 소스 코드 안에 박혀 있습니다(하드코딩).
+
+개선 방향: rosSimCmd::doIt(const MArgList& args)의 args 인자를 분석해서, 마야에서 스크립트를 칠 때 rosSim -topic "/joint_arm1" -rate 0.05 처럼 사용자가 동적으로 값을 변경할 수 있게 만들어야 합니다.
+
+9. 🔥 사수가 박수 치는 실무 1% 디테일 (Senior-Pleasing Details)
+
+기능이 돌아가는 것을 넘어서, 다른 개발자를 배려하고 시스템 자원을 아끼는 "디테일"을 챙기면 실력을 크게 인정받을 수 있습니다.
+
+① namespace를 활용한 심볼 충돌 방지 (전역 오염 방지)
+
+디테일: 현재 rosNode, timerCallbackId 같은 변수들이 날것 그대로 파일 전역에 노출되어 있습니다. 마야 안에는 수십 개의 플러그인이 동시에 돌아가는데, 우연히 다른 플러그인에 timerCallbackId라는 변수가 있다면 마야가 크래시(Crash) 날 수 있습니다.
+
+사수의 칭찬 포인트: 이 변수들을 익명 네임스페이스(namespace { ... })로 감싸거나, namespace RosMayaPlugin { ... } 으로 묶어두면 "이 친구 스코프(Scope) 관리를 할 줄 아네?" 라는 평가를 받습니다.
+
+② "더티 플래그(Dirty Flag)" 패턴 적용 (불필요한 연산 막기)
+
+디테일: 0.03초마다 타이머가 돌고 있는데, 만약 로봇이 가만히 있어서 각도가 변하지 않았다면? 현재 코드는 똑같은 각도를 마야에 계속 덮어씌우며 불필요한 Euler -> Quaternion 수학 연산을 반복하고 있습니다.
+
+사수의 칭찬 포인트: 이전에 받은 각도를 lastAngle에 저장해두고, if (abs(targetAngle - lastAngle) < 0.0001) return; 이라는 한 줄을 추가해 조기 종료(Early Exit) 시키세요. 마야의 렌더링 자원을 엄청나게 아껴주는 프로의 솜씨입니다.
+
+③ 완벽한 스레드 안전성 확보 (std::atomic)
+
+디테일: ROS 통신(네트워크 스레드)과 마야 타이머(메인 스레드)가 double targetAngle 변수 하나를 동시에 건드리고 있습니다. C++에서 8바이트인 double은 값을 읽고 쓰는 찰나의 순간에 찢어짐(Tearing)이 발생할 확률이 미세하게 존재합니다.
+
+사수의 칭찬 포인트: 단순히 double을 쓰는 대신 #include <atomic>을 추가하고 std::atomic<double> targetAngle(0.0); 으로 선언해 보세요. "멀티스레딩의 레이스 컨디션(Race Condition) 방어까지 생각했구나" 라며 극찬을 받을 것입니다.
+
+④ 에러가 났을 때는 소리치게 만들기 (Maya Logging)
+
+디테일: 현재 코드는 선택된 객체가 없으면 if (slist.isEmpty()) return; 하고 조용히 함수를 끝내버립니다. 사용자는 왜 로봇이 안 움직이는지 알 길이 없습니다.
+
+사수의 칭찬 포인트: return 하기 직전에 MGlobal::displayWarning("선택된 마야 객체가 없습니다! 로봇을 연동할 오브젝트를 선택해주세요."); 라고 콘솔에 이유를 찍어주세요. 유지보수와 디버깅을 배려하는 코딩 습관입니다.

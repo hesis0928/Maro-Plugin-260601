@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "maya-ros-sim",
+  "version-string": "0.1.0",
+  "dependencies": [
+    // ros-noetic-cv-bridge를 삭제했습니다.
+    // 만약 다른 의존성이 없다면, 이 "dependencies" 배열은 비어있게 됩니다.
+  ]
+}
