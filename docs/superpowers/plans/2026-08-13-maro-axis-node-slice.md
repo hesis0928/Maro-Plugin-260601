@@ -6,7 +6,7 @@
 
 **Architecture:** Maya DG가 단일 진실 원천이다. 커스텀 DG 노드(`maroAxis` 로케이터 + 능력 노드 스택 + `maroRobot`)가 모든 상태를 보유한다. 좌표 변환은 Maya·ROS 2 어느 쪽에도 의존하지 않는 순수 라이브러리로 분리해 Maya 없이 테스트한다. ROS 2 통신은 백그라운드 스레드에서 돌고, Maya 메인 스레드와는 두 개의 큐로만 만난다.
 
-**Tech Stack:** C++20, Maya 2026 devkit, ROS 2 Jazzy (네이티브 Windows 소스 빌드), CMake + Ninja, vcpkg, GoogleTest
+**Tech Stack:** C++17, Maya 2026 devkit, ROS 2 Jazzy (네이티브 Windows 소스 빌드), CMake + Ninja, vcpkg, GoogleTest
 
 ## Global Constraints
 
@@ -21,7 +21,15 @@
   - **런타임 데이터 흐름**(매 프레임 도착하는 관절 명령)은 `MPlug` 직접 쓰기이며 **undo 스택에 남기지 않는다.** 초당 수십 번의 값 갱신을 undo에 쌓으면 사용자의 Ctrl+Z가 무의미해진다. Maya 자체의 시뮬레이션·캐시 노드와 같은 관행이다.
 - **조용한 실패 금지.** 거부·비활성화 시 사유를 출력한다. 단 매 프레임 반복되는 경고는 상태 변화 시 1회만.
 - **노드 타입 접두사는 `maro`** (`Maro` = **Ma**ya + **Ro**s).
+- **C++17.** Maya 2026 devkit의 `devkit.cmake`가 플러그인 타깃에 `CMAKE_CXX_STANDARD 17` + `REQUIRED ON`을 강제한다. Maya의 헤더와 ABI가 그걸 전제하므로 우리 쪽에서 올릴 수 없다. `maro_transform`도 플러그인에 링크되므로 같은 표준을 쓴다(C++20 기능을 쓰는 곳도 없다).
 - 경로 상수: devkit `C:/Users/ckd30/Projects/devkitBase`, ROS 2 `C:/dev/ros2_jazzy/install`, vcpkg `C:/src/vcpkg`.
+- **빌드 환경 주의**: 이 머신에서 `Launch-VsDevShell.ps1`은 `vswhere.exe`를 못 찾아 `INCLUDE`/`LIB`를 비운 채 조용히 성공한다. 결과는 `basetsd.h`를 못 찾는 엉뚱한 컴파일 에러다. 대신 `VsDevCmd.bat`의 환경을 가져와 쓰고, PowerShell 도구 호출 간에는 환경이 유지되지 않으므로 **빌드와 같은 호출 안에서** 설정한다.
+
+```powershell
+cmd /c '"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" -arch=amd64 -host_arch=amd64 && set' | ForEach-Object {
+    if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "Env:$($matches[1])" -Value $matches[2] }
+}
+```
 - **벤더 DLL은 `install/opt/<vendor>/bin`에 있다.** `yaml.dll`, `spdlog.dll`, `console_bridge.dll`을 `install/bin`과 함께 복사해야 로드된다.
 
 ## 범위 밖 (건드리지 않음)
