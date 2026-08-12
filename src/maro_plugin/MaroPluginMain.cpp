@@ -3,6 +3,7 @@
 #include <maya/MStatus.h>
 
 #include "MaroAxisNode.h"
+#include "MaroCapabilityNodes.h"
 #include "MaroCommands.h"
 
 namespace {
@@ -22,6 +23,33 @@ MStatus initializePlugin(MObject obj) {
     if (!status) {
         status.perror("Maro: failed to register maroAxis");
         return status;
+    }
+
+    struct CapabilityRegistration {
+        const char* name;
+        MTypeId id;
+        MCreatorFunction creator;
+        MInitializeFunction initialize;
+    };
+
+    const CapabilityRegistration kCapabilities[] = {
+        {"maroRotation", maro::MaroRotationNode::id,
+         maro::MaroRotationNode::creator, maro::MaroRotationNode::initialize},
+        {"maroLimit", maro::MaroLimitNode::id,
+         maro::MaroLimitNode::creator, maro::MaroLimitNode::initialize},
+        {"maroSensorDirection", maro::MaroSensorDirectionNode::id,
+         maro::MaroSensorDirectionNode::creator,
+         maro::MaroSensorDirectionNode::initialize},
+        {"maroSensorRange", maro::MaroSensorRangeNode::id,
+         maro::MaroSensorRangeNode::creator, maro::MaroSensorRangeNode::initialize},
+    };
+
+    for (const auto& cap : kCapabilities) {
+        status = plugin.registerNode(cap.name, cap.id, cap.creator, cap.initialize);
+        if (!status) {
+            status.perror(MString("Maro: failed to register ") + cap.name);
+            return status;
+        }
     }
 
     status = plugin.registerCommand(
@@ -51,6 +79,11 @@ MStatus uninitializePlugin(MObject obj) {
 
     plugin.deregisterCommand("maroConnectAxis");
     plugin.deregisterCommand("maroBindAxis");
+
+    plugin.deregisterNode(maro::MaroSensorRangeNode::id);
+    plugin.deregisterNode(maro::MaroSensorDirectionNode::id);
+    plugin.deregisterNode(maro::MaroLimitNode::id);
+    plugin.deregisterNode(maro::MaroRotationNode::id);
 
     MStatus status = plugin.deregisterNode(maro::MaroAxisNode::id);
     if (!status) {

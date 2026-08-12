@@ -6,6 +6,7 @@ set(PROJECT_NAME maro)
 set(SOURCE_FILES
     MaroPluginMain.cpp
     MaroAxisNode.cpp
+    MaroCapabilityNodes.cpp
     MaroCommands.cpp
 )
 

@@ -1,5 +1,9 @@
 #include "MaroAxisNode.h"
 
+#include <algorithm>
+#include <cmath>
+
+#include <maya/MArrayDataHandle.h>
 #include <maya/MDataBlock.h>
 #include <maya/MDataHandle.h>
 #include <maya/MFnCompoundAttribute.h>
@@ -128,19 +132,68 @@ MStatus MaroAxisNode::initialize() {
         attributeAffects(src, aOutTransform);
     }
 
+    attributeAffects(aCapabilityIn, aOutValue);
+    attributeAffects(aCapabilityIn, aOutTransform);
+
     return MS::kSuccess;
 }
 
 MStatus MaroAxisNode::compute(const MPlug& plug, MDataBlock& data) {
-    // 예외는 경계를 넘지 않는다. compute에서 던지면 Maya가 죽는다.
     try {
         if (plug != aOutValue && plug != aOutTransform) {
             return MS::kUnknownParameter;
         }
 
-        // 스택 평가는 Task 8에서 채운다. 지금은 항등값을 낸다.
+        const bool enabled = data.inputValue(aEnabled).asBool();
+
+        double value = 0.0;
+
+        if (enabled) {
+            // 스택은 capabilityIn 인덱스 순서대로 평가한다.
+            // rotation이 값을 만들고, 뒤따르는 limit들이 순차적으로 클램프한다.
+            // 값은 전부 데이터블록에서 읽는다. 플러그를 직접 조회하면 DG 더티
+            // 전파를 우회해 병렬 평가에서 값이 어긋난다.
+            const short axisIndex = data.inputValue(aConventionAxis).asShort();
+            const unsigned int component =
+                (axisIndex == 0) ? 0u : ((axisIndex == 2) ? 2u : 1u);
+
+            // 모드가 기준값의 출처를 정한다. 리밋은 어느 쪽이든 똑같이 적용된다.
+            const bool rosDriven = data.inputValue(aControlMode).asShort() == 1;
+
+            MArrayDataHandle stack = data.inputArrayValue(aCapabilityIn);
+
+            for (unsigned int i = 0; i < stack.elementCount(); ++i) {
+                stack.jumpToArrayElement(i);
+                MDataHandle element = stack.inputValue();
+
+                const short capType = element.child(aCapType).asShort();
+
+                if (capType == 0) {           // rotation
+                    value = rosDriven ? data.inputValue(aRosCommand).asDouble()
+                                      : element.child(aCapValue).asDouble();
+                } else if (capType == 1) {    // limit
+                    const short3& enable = element.child(aCapEnable).asShort3();
+                    if (enable[component] != 0) {
+                        const double3& lo = element.child(aCapMin).asDouble3();
+                        const double3& hi = element.child(aCapMax).asDouble3();
+                        value = std::clamp(value,
+                                           std::min(lo[component], hi[component]),
+                                           std::max(lo[component], hi[component]));
+                    }
+                }
+                // 센서 노드(capType 2, 3)는 구동값에 기여하지 않는다. S4에서 소비한다.
+            }
+        }
+
+        // NaN/inf를 Maya에 흘리지 않는다.
+        if (!std::isfinite(value)) {
+            MGlobal::displayWarning(
+                "Maro: axis produced a non-finite value; holding zero.");
+            value = 0.0;
+        }
+
         MDataHandle outVal = data.outputValue(aOutValue);
-        outVal.setDouble(0.0);
+        outVal.setDouble(value);
         outVal.setClean();
 
         MDataHandle outXf = data.outputValue(aOutTransform);
