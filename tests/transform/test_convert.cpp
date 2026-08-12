@@ -175,8 +175,11 @@ TEST(AxisConventionTest, InvertFlipsJointSign) {
 
 TEST(AxisConventionTest, JointRoundTripSurvivesRandomAngles) {
     std::mt19937 rng(20260813);
-    // 왕복이 유일하게 정의되는 구간 (-pi, pi].
-    std::uniform_real_distribution<double> angleDist(-3.14159, 3.14159);
+    // 왕복이 유일하게 정의되는 구간은 (-2pi, 2pi] 이다. atan2가 (-pi, pi] 를
+    // 돌려주고 그 값을 두 배로 쓰기 때문이다. |angle| > pi 구간을 반드시
+    // 포함해야 한다 — 거기서 반각이 pi/2 를 넘어 cosHalf 가 음수가 되고,
+    // asin 으로 구현했을 때 비로소 틀린 답이 나온다.
+    std::uniform_real_distribution<double> angleDist(-6.0, 6.0);
 
     const maro::LocalAxis axes[] = {maro::LocalAxis::X, maro::LocalAxis::Y,
                                     maro::LocalAxis::Z};
@@ -191,6 +194,17 @@ TEST(AxisConventionTest, JointRoundTripSurvivesRandomAngles) {
         ASSERT_NEAR(back, angle, 1e-9)
             << "axis=" << static_cast<int>(conv.axis)
             << " invert=" << conv.invert << " angle=" << angle;
+    }
+}
+
+TEST(AxisConventionTest, RecoversAnglesBeyondPi) {
+    // 반각이 pi/2 를 넘는 구간. asin 으로 구현하면 여기서 틀린다.
+    const maro::AxisConvention conv{maro::LocalAxis::Y, false};
+
+    for (const double angle : {2.0, 3.5, 5.0, -3.5, -5.0}) {
+        const double back =
+            maro::mayaRotationToJoint(maro::jointToMayaRotation(angle, conv), conv);
+        EXPECT_NEAR(back, angle, 1e-9) << "angle=" << angle;
     }
 }
 
