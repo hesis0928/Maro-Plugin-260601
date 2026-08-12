@@ -12,4 +12,12 @@ Vec3 rosToMayaPosition(const Vec3& ros, const SceneUnit& unit) {
     return Vec3{ros.x / s, ros.z / s, -ros.y / s};
 }
 
+Quat mayaToRosRotation(const Quat& maya) {
+    return Quat{maya.x, -maya.z, maya.y, maya.w};
+}
+
+Quat rosToMayaRotation(const Quat& ros) {
+    return Quat{ros.x, ros.z, -ros.y, ros.w};
+}
+
 }  // namespace maro

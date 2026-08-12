@@ -17,4 +17,9 @@ namespace maro {
 Vec3 mayaToRosPosition(const Vec3& maya, const SceneUnit& unit);
 Vec3 rosToMayaPosition(const Vec3& ros, const SceneUnit& unit);
 
+// 쿼터니언의 벡터부는 진짜 회전(det=+1) 아래에서 위치 벡터와 같은 규칙으로
+// 변환되고, 스칼라부 w는 불변이다. 스케일은 회전에 영향을 주지 않는다.
+Quat mayaToRosRotation(const Quat& maya);
+Quat rosToMayaRotation(const Quat& ros);
+
 }  // namespace maro
