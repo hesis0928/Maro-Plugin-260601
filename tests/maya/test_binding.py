@@ -38,6 +38,18 @@ try:
 except RuntimeError:
     print("non-transform bind rejected OK")
 
+# 3.5) 이미 바인딩된 축을 다른 오브젝트에 다시 바인딩 -> 거부
+cubeOther = cmds.polyCube(name="armSegmentOther")[0]
+try:
+    cmds.maroBindAxis(axis, cubeOther)
+    raise AssertionError("rebinding a bound axis to another object should be rejected")
+except RuntimeError:
+    print("axis rebind rejected OK")
+
+# 같은 오브젝트에 다시 바인딩하는 것은 무해한 반복이므로 성공해야 한다
+cmds.maroBindAxis(axis, cube)
+print("idempotent rebind OK")
+
 # 4) undo 하면 연결이 사라진다
 cmds.undo()
 print("undo OK")
