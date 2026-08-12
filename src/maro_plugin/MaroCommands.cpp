@@ -116,6 +116,7 @@ MStatus MaroBindAxisCommand::doIt(const MArgList& args) {
         status = m_modifier.connect(targetMessage, axisTarget);
         if (!status) return status;
 
+        m_stagedChange = true;
         return redoIt();
     } catch (const std::exception& e) {
         MGlobal::displayError(MString("Maro: maroBindAxis failed: ") + e.what());
