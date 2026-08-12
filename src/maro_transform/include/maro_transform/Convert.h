@@ -22,4 +22,12 @@ Vec3 rosToMayaPosition(const Vec3& ros, const SceneUnit& unit);
 Quat mayaToRosRotation(const Quat& maya);
 Quat rosToMayaRotation(const Quat& ros);
 
+// 보정이 가리키는 단위 회전축을 로컬 좌표로 돌려준다.
+Vec3 axisVectorOf(const AxisConvention& conv);
+
+// 관절 스칼라값 <-> Maya 회전. 보정은 순수 입력 파라미터이므로
+// 라이브러리는 상태를 갖지 않고, 보정된 경우도 같은 테스트로 검증된다.
+Quat jointToMayaRotation(double angleRad, const AxisConvention& conv);
+double mayaRotationToJoint(const Quat& maya, const AxisConvention& conv);
+
 }  // namespace maro

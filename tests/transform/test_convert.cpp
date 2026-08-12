@@ -1,4 +1,5 @@
 #include <cmath>
+#include <random>
 #include <gtest/gtest.h>
 
 #include "maro_transform/Types.h"
@@ -149,4 +150,78 @@ TEST(Rotation, RoundTripIsIdentity) {
     EXPECT_NEAR(back.y, original.y, 1e-12);
     EXPECT_NEAR(back.z, original.z, 1e-12);
     EXPECT_NEAR(back.w, original.w, 1e-12);
+}
+
+TEST(AxisConventionTest, VectorSelectsAndSignsLocalAxis) {
+    const maro::Vec3 y = maro::axisVectorOf({maro::LocalAxis::Y, false});
+    EXPECT_NEAR(y.x, 0.0, 1e-12);
+    EXPECT_NEAR(y.y, 1.0, 1e-12);
+    EXPECT_NEAR(y.z, 0.0, 1e-12);
+
+    const maro::Vec3 negZ = maro::axisVectorOf({maro::LocalAxis::Z, true});
+    EXPECT_NEAR(negZ.z, -1.0, 1e-12);
+}
+
+TEST(AxisConventionTest, InvertFlipsJointSign) {
+    const maro::AxisConvention plain{maro::LocalAxis::Y, false};
+    const maro::AxisConvention flipped{maro::LocalAxis::Y, true};
+
+    const double angle = 0.7;
+    const maro::Quat q = maro::jointToMayaRotation(angle, plain);
+
+    EXPECT_NEAR(maro::mayaRotationToJoint(q, plain), angle, 1e-9);
+    EXPECT_NEAR(maro::mayaRotationToJoint(q, flipped), -angle, 1e-9);
+}
+
+TEST(AxisConventionTest, JointRoundTripSurvivesRandomAngles) {
+    std::mt19937 rng(20260813);
+    // 왕복이 유일하게 정의되는 구간 (-pi, pi].
+    std::uniform_real_distribution<double> angleDist(-3.14159, 3.14159);
+
+    const maro::LocalAxis axes[] = {maro::LocalAxis::X, maro::LocalAxis::Y,
+                                    maro::LocalAxis::Z};
+
+    for (int i = 0; i < 2000; ++i) {
+        const maro::AxisConvention conv{axes[i % 3], (i % 2) == 0};
+        const double angle = angleDist(rng);
+
+        const double back =
+            maro::mayaRotationToJoint(maro::jointToMayaRotation(angle, conv), conv);
+
+        ASSERT_NEAR(back, angle, 1e-9)
+            << "axis=" << static_cast<int>(conv.axis)
+            << " invert=" << conv.invert << " angle=" << angle;
+    }
+}
+
+TEST(AxisConventionTest, FullPoseRoundTripSurvivesRandomValues) {
+    std::mt19937 rng(99);
+    std::uniform_real_distribution<double> posDist(-1000.0, 1000.0);
+    std::uniform_real_distribution<double> qDist(-1.0, 1.0);
+
+    // 극단 스케일도 함께 흘린다.
+    const double scales[] = {1.0, 0.01, 0.001, 100.0};
+
+    for (int i = 0; i < 2000; ++i) {
+        const maro::SceneUnit unit{scales[i % 4]};
+        const maro::Vec3 p{posDist(rng), posDist(rng), posDist(rng)};
+
+        const maro::Vec3 pBack =
+            maro::mayaToRosPosition(maro::rosToMayaPosition(p, unit), unit);
+        ASSERT_NEAR(pBack.x, p.x, 1e-6);
+        ASSERT_NEAR(pBack.y, p.y, 1e-6);
+        ASSERT_NEAR(pBack.z, p.z, 1e-6);
+
+        maro::Quat q{qDist(rng), qDist(rng), qDist(rng), qDist(rng)};
+        const double n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        if (n < 1e-6) continue;
+        q = maro::Quat{q.x / n, q.y / n, q.z / n, q.w / n};
+
+        const maro::Quat qBack =
+            maro::mayaToRosRotation(maro::rosToMayaRotation(q));
+        ASSERT_NEAR(qBack.x, q.x, 1e-12);
+        ASSERT_NEAR(qBack.y, q.y, 1e-12);
+        ASSERT_NEAR(qBack.z, q.z, 1e-12);
+        ASSERT_NEAR(qBack.w, q.w, 1e-12);
+    }
 }
