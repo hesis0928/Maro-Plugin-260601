@@ -3,6 +3,7 @@
 #include <maya/MStatus.h>
 
 #include "MaroAxisNode.h"
+#include "MaroCommands.h"
 
 namespace {
 constexpr char kVendor[] = "Maro";
@@ -23,12 +24,33 @@ MStatus initializePlugin(MObject obj) {
         return status;
     }
 
+    status = plugin.registerCommand(
+        "maroBindAxis",
+        maro::MaroBindAxisCommand::creator,
+        maro::MaroBindAxisCommand::newSyntax);
+    if (!status) {
+        status.perror("Maro: failed to register maroBindAxis");
+        return status;
+    }
+
+    status = plugin.registerCommand(
+        "maroConnectAxis",
+        maro::MaroConnectAxisCommand::creator,
+        maro::MaroConnectAxisCommand::newSyntax);
+    if (!status) {
+        status.perror("Maro: failed to register maroConnectAxis");
+        return status;
+    }
+
     MGlobal::displayInfo("Maro: plugin loaded.");
     return MS::kSuccess;
 }
 
 MStatus uninitializePlugin(MObject obj) {
     MFnPlugin plugin(obj);
+
+    plugin.deregisterCommand("maroConnectAxis");
+    plugin.deregisterCommand("maroBindAxis");
 
     MStatus status = plugin.deregisterNode(maro::MaroAxisNode::id);
     if (!status) {
