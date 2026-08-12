@@ -623,8 +623,11 @@ TEST(AxisConventionTest, InvertFlipsJointSign) {
 
 TEST(AxisConventionTest, JointRoundTripSurvivesRandomAngles) {
     std::mt19937 rng(20260813);
-    // 왕복이 유일하게 정의되는 구간 (-pi, pi].
-    std::uniform_real_distribution<double> angleDist(-3.14159, 3.14159);
+    // 왕복이 유일하게 정의되는 구간은 (-2pi, 2pi] 이다. atan2가 (-pi, pi] 를
+    // 돌려주고 그 값을 두 배로 쓰기 때문이다. |angle| > pi 구간을 반드시
+    // 포함해야 한다 — 거기서 반각이 pi/2 를 넘어 cosHalf 가 음수가 되고,
+    // asin 으로 구현했을 때 비로소 틀린 답이 나온다.
+    std::uniform_real_distribution<double> angleDist(-6.0, 6.0);
 
     const maro::LocalAxis axes[] = {maro::LocalAxis::X, maro::LocalAxis::Y,
                                     maro::LocalAxis::Z};
@@ -639,6 +642,18 @@ TEST(AxisConventionTest, JointRoundTripSurvivesRandomAngles) {
         ASSERT_NEAR(back, angle, 1e-9)
             << "axis=" << static_cast<int>(conv.axis)
             << " invert=" << conv.invert << " angle=" << angle;
+    }
+}
+
+TEST(AxisConventionTest, RecoversAnglesBeyondPi) {
+    // 반각이 pi/2 를 넘는 구간. asin 으로 구현하면 여기서 틀린다.
+    // 무작위 draw에 의존하지 않고 이 성질을 못박는다.
+    const maro::AxisConvention conv{maro::LocalAxis::Y, false};
+
+    for (const double angle : {2.0, 3.5, 5.0, -3.5, -5.0}) {
+        const double back =
+            maro::mayaRotationToJoint(maro::jointToMayaRotation(angle, conv), conv);
+        EXPECT_NEAR(back, angle, 1e-9) << "angle=" << angle;
     }
 }
 
@@ -737,7 +752,27 @@ cmake --build out/build && ctest --test-dir out/build --output-on-failure
 
 기대: 무작위 4000회를 포함해 전체 통과.
 
-- [ ] **Step 5: 커밋**
+- [ ] **Step 5: 테스트가 `atan2` 선택을 실제로 방어하는지 확인**
+
+`atan2` 대신 `asin`을 써도 통과한다면 이 테스트들은 아무것도 지키지 못한다. 일부러 바꿔서 확인한다.
+
+`Convert.cpp`의 `mayaRotationToJoint` 반환문을 아래로 바꾼다.
+
+```cpp
+    return 2.0 * std::asin(std::clamp(sinHalf, -1.0, 1.0));
+```
+
+빌드·실행한다.
+
+```bash
+cmake --build out/build && ctest --test-dir out/build --output-on-failure
+```
+
+기대: `AxisConventionTest.RecoversAnglesBeyondPi`와 `AxisConventionTest.JointRoundTripSurvivesRandomAngles`가 **둘 다 실패**한다. 실패 출력을 확인했으면 원래대로 되돌리고(`git diff`로 `Convert.cpp`에 변경이 없음을 확인) 다시 빌드해 전체 통과를 본다.
+
+둘 중 하나라도 통과한다면 각도 구간이 좁아 `asin`과 `atan2`가 구분되지 않는 것이다. 허용오차를 늘려 초록불을 만들지 말고 구간을 넓혀라.
+
+- [ ] **Step 6: 커밋**
 
 ```bash
 git add src/maro_transform tests/transform/test_convert.cpp
