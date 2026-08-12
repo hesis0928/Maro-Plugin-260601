@@ -336,3 +336,41 @@ RViz2는 이 Windows 빌드에 포함되어 있지 않으므로(§12), 같은 DD
 `shutdown_ros2()`가 노드만 해제하고 퍼블리셔를 해제하지 않아, 모든 정리 함수가 성공을 반환한 뒤에도 **프로세스가 종료되지 않았다**(30초 초과 확인). 퍼블리셔가 노드 내부를 참조해 DDS 참가자가 살아남는 것이 원인이었다. 퍼블리셔를 노드보다 먼저 해제하도록 수정하여 해결했다.
 
 이 결함은 정적 검사로는 드러나지 않으며 실행해야만 보인다. §9 원칙 6(자원 수명)과 §10 2단계의 정리 시나리오 테스트가 필요한 이유를 실증하는 사례다. Maya 안에서 같은 문제가 발생하면 플러그인 리로드나 Maya 종료가 멈춘다.
+
+## 13. 구현 참조 — Maya devkit 샘플
+
+`C:\Users\ckd30\Projects\devkitBase\devkit\plug-ins`의 공식 샘플 중 본 설계에 직접 대응하는 것들이다. 플랜 단계에서 해당 패턴을 따른다.
+
+| 설계 요소 | 참조 샘플 |
+|---|---|
+| §8 연쇄 삭제 (undo 정합) | `deletedMsgCmd` |
+| §4 `maroAxis` 로케이터 + 뷰포트 렌더링 | `footPrintNode`, `footPrintNode_GeometryOverride`, `footPrintNode_SubSceneOverride` |
+| 뷰포트 포인팅·드래그 조작 | `footPrintManip`, `moveManip`, `pointManip`, `customAttrManip` |
+| §4 능력 노드 `compute()` / 어트리뷰트 | `offsetNode`, `sineNode`, `affectsNode`, `genericAttributeNode` |
+| 콜백 수명 관리 (§9 원칙 6) | `nodeMessageCmd`, `undoRedoMsgCmd`, `pluginCallbacks` |
+| §6 스레딩 | `threadingLockTests`, `threadTestWithLocksCmd` |
+| 상태 모니터 패널 (v1) / S3 에디터 | `workspaceControlCmd`, `qtForms`, `helixQtCmd` |
+| 플러그인 스켈레톤 | `template/` |
+
+### 연쇄 삭제의 정확한 메커니즘 (중요)
+
+§8이 요구하는 "삭제 전파가 사용자의 삭제와 같은 undo 청크에 묶일 것"은 직접 구현할 필요가 없다. `deletedMsgCmd`가 문서화하듯,
+
+- `MNodeMessage::addNodeAboutToDeleteCallback`은 콜백에 **`MDGModifier`를 넘겨준다**
+- 이 modifier에 실은 작업은 노드 삭제 **이전에** 실행되며, **undo·redo가 함께 묶인다**
+
+따라서 오브젝트의 about-to-delete 콜백에서 이 modifier에 축 삭제를 실으면 undo 정합성이 API 차원에서 보장된다. 세 종류 콜백(`aboutToDelete` / `preRemoval` / `nodeRemoved`)의 호출 순서와 redo 시 차이도 해당 샘플에 정리되어 있다.
+
+### 빌드 통합
+
+devkit은 공식 CMake 진입점을 제공한다.
+
+```cmake
+include($ENV{DEVKIT_LOCATION}/cmake/pluginEntry.cmake)
+set(PROJECT_NAME ...)
+set(SOURCE_FILES ...)
+set(LIBRARIES OpenMaya OpenMayaRender OpenMayaUI Foundation)
+build_plugin()
+```
+
+`build_plugin()`이 `.mll` 접미사, `NT_PLUGIN` 정의, devkit include/lib 경로를 처리한다. 기존 `CMakeLists.txt.bak`은 이들을 절대 경로로 하드코딩하고 있었는데(`memo/truble1.txt`에서 지적된 문제), 이 진입점을 쓰면 해소된다. ROS 2 링크 설정만 추가로 얹으면 된다.
