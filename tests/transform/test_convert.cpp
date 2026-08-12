@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "maro_transform/Types.h"
+#include "maro_transform/Convert.h"
 
 TEST(Harness, TypesAreUsable) {
     maro::Vec3 v{1.0, 2.0, 3.0};
@@ -17,4 +18,41 @@ TEST(Harness, TypesAreUsable) {
 TEST(Harness, NonFiniteIsDetected) {
     maro::Vec3 bad{1.0, std::nan(""), 3.0};
     EXPECT_FALSE(maro::isFinite(bad));
+}
+
+namespace {
+constexpr double kEps = 1e-12;
+}
+
+TEST(Position, MayaUpBecomesRosUp) {
+    // Maya의 위 방향은 +Y, ROS의 위 방향은 +Z다.
+    const maro::SceneUnit unit{1.0};  // 스케일 영향을 배제
+    const maro::Vec3 mayaUp{0.0, 1.0, 0.0};
+
+    const maro::Vec3 ros = maro::mayaToRosPosition(mayaUp, unit);
+
+    EXPECT_NEAR(ros.x, 0.0, kEps);
+    EXPECT_NEAR(ros.y, 0.0, kEps);
+    EXPECT_NEAR(ros.z, 1.0, kEps);
+}
+
+TEST(Position, ScaleConvertsCentimetresToMetres) {
+    const maro::SceneUnit cm{0.01};
+    const maro::Vec3 maya{100.0, 0.0, 0.0};
+
+    const maro::Vec3 ros = maro::mayaToRosPosition(maya, cm);
+
+    EXPECT_NEAR(ros.x, 1.0, kEps);
+}
+
+TEST(Position, RoundTripIsIdentity) {
+    const maro::SceneUnit cm{0.01};
+    const maro::Vec3 original{12.5, -3.25, 88.0};
+
+    const maro::Vec3 back =
+        maro::mayaToRosPosition(maro::rosToMayaPosition(original, cm), cm);
+
+    EXPECT_NEAR(back.x, original.x, 1e-9);
+    EXPECT_NEAR(back.y, original.y, 1e-9);
+    EXPECT_NEAR(back.z, original.z, 1e-9);
 }
