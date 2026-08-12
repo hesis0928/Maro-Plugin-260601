@@ -5,6 +5,7 @@
 #include "MaroAxisNode.h"
 #include "MaroCapabilityNodes.h"
 #include "MaroCommands.h"
+#include "MaroDeleteWatcher.h"
 
 namespace {
 constexpr char kVendor[] = "Maro";
@@ -70,12 +71,20 @@ MStatus initializePlugin(MObject obj) {
         return status;
     }
 
+    status = maro::MaroDeleteWatcher::install();
+    if (!status) {
+        status.perror("Maro: failed to install delete watcher");
+        return status;
+    }
+
     MGlobal::displayInfo("Maro: plugin loaded.");
     return MS::kSuccess;
 }
 
 MStatus uninitializePlugin(MObject obj) {
     MFnPlugin plugin(obj);
+
+    maro::MaroDeleteWatcher::uninstall();
 
     plugin.deregisterCommand("maroConnectAxis");
     plugin.deregisterCommand("maroBindAxis");

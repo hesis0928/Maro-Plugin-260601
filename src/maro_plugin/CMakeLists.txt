@@ -8,6 +8,7 @@ set(SOURCE_FILES
     MaroAxisNode.cpp
     MaroCapabilityNodes.cpp
     MaroCommands.cpp
+    MaroDeleteWatcher.cpp
 )
 
 set(LIBRARIES
