@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(maro LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 소스에 한국어 주석이 있다. MSVC 기본 코드페이지(949)로 읽으면 C4819가 뜨고
