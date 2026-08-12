@@ -473,6 +473,34 @@ TEST(Rotation, IdentityStaysIdentity) {
     EXPECT_NEAR(ros.w, 1.0, 1e-12);
 }
 
+TEST(Rotation, MayaRollFlipsSignIntoRosY) {
+    // 부호가 실제로 뒤집히는 축을 검사한다. 위 두 테스트는 qz가 0이라
+    // -qz와 qz를 구분하지 못하고, 왕복 테스트는 반사(reflection)도 통과시킨다.
+    // Task 2에서 위치 변환이 같은 함정에 빠졌던 것과 같은 구조다.
+    const double h = std::sqrt(2.0) / 2.0;
+    const maro::Quat mayaRoll{0.0, 0.0, h, h};   // Maya +Z 축 회전
+
+    const maro::Quat ros = maro::mayaToRosRotation(mayaRoll);
+
+    EXPECT_NEAR(ros.x, 0.0, 1e-12);
+    EXPECT_NEAR(ros.y, -h, 1e-12);   // Maya +Z -> ROS -Y
+    EXPECT_NEAR(ros.z, 0.0, 1e-12);
+    EXPECT_NEAR(ros.w, h, 1e-12);
+}
+
+TEST(Rotation, RosPitchFlipsSignIntoMayaZ) {
+    // 역방향도 부호가 걸린 축에서 검사한다.
+    const double h = std::sqrt(2.0) / 2.0;
+    const maro::Quat rosPitch{0.0, h, 0.0, h};   // ROS +Y 축 회전
+
+    const maro::Quat maya = maro::rosToMayaRotation(rosPitch);
+
+    EXPECT_NEAR(maya.x, 0.0, 1e-12);
+    EXPECT_NEAR(maya.y, 0.0, 1e-12);
+    EXPECT_NEAR(maya.z, -h, 1e-12);  // ROS +Y -> Maya -Z
+    EXPECT_NEAR(maya.w, h, 1e-12);
+}
+
 TEST(Rotation, RoundTripIsIdentity) {
     const maro::Quat original{0.18257418583505536, 0.3651483716701107,
                               0.5477225575051661, 0.7302967433402214};
@@ -526,9 +554,23 @@ Quat rosToMayaRotation(const Quat& ros) {
 cmake --build out/build && ctest --test-dir out/build --output-on-failure
 ```
 
-기대: `Rotation.*` 3개 포함 전체 통과.
+기대: `Rotation.*` 5개 포함 전체 통과.
 
-- [ ] **Step 5: 커밋**
+- [ ] **Step 5: 새 테스트가 실제로 방어하는지 확인**
+
+통과하는 걸 본 것만으로는 부족하다. 일부러 부호를 뒤집어 테스트가 잡는지 본다.
+
+`Convert.cpp`의 `mayaToRosRotation`에서 `-maya.z`를 `maya.z`로 바꾸고 빌드·실행한다.
+
+```bash
+cmake --build out/build && ctest --test-dir out/build --output-on-failure
+```
+
+기대: `Rotation.MayaRollFlipsSignIntoRosY`가 **실패**한다. 실패 출력을 보고했다면 원래대로 되돌리고 다시 빌드해 전체 통과를 확인한다.
+
+실패하지 않는다면 테스트가 아무것도 지키지 못하고 있는 것이므로, 되돌리기 전에 테스트를 고친다.
+
+- [ ] **Step 6: 커밋**
 
 ```bash
 git add src/maro_transform tests/transform/test_convert.cpp
