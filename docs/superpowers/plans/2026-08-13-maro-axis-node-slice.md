@@ -16,7 +16,9 @@
 - **예외는 경계를 넘지 않는다.** 모든 Maya 콜백(`compute`, 타이머, DG 메시지)과 ROS 2 콜백 최상위에 catch-all을 둔다.
 - **`NaN`/`inf`를 Maya 어트리뷰트에 쓰지 않는다.** 유한성 검사 실패 시 직전 유효값을 유지한다.
 - **`compute()` 안에서 씬 그래프를 수정하지 않는다.** 순수 계산만 한다.
-- **어트리뷰트 쓰기는 `MPxCommand` 경유.** Undo 정합성을 위해서다.
+- **어트리뷰트 쓰기 경로는 두 가지이며 섞지 않는다.**
+  - **사용자 구성 변경**(바인딩, 축 연결, 모드 전환, 보정값)은 반드시 `MPxCommand` + `MDGModifier` 경유. Undo 정합성을 위해서다.
+  - **런타임 데이터 흐름**(매 프레임 도착하는 관절 명령)은 `MPlug` 직접 쓰기이며 **undo 스택에 남기지 않는다.** 초당 수십 번의 값 갱신을 undo에 쌓으면 사용자의 Ctrl+Z가 무의미해진다. Maya 자체의 시뮬레이션·캐시 노드와 같은 관행이다.
 - **조용한 실패 금지.** 거부·비활성화 시 사유를 출력한다. 단 매 프레임 반복되는 경고는 상태 변화 시 1회만.
 - **노드 타입 접두사는 `maro`** (`Maro` = **Ma**ya + **Ro**s).
 - 경로 상수: devkit `C:/Users/ckd30/Projects/devkitBase`, ROS 2 `C:/dev/ros2_jazzy/install`, vcpkg `C:/src/vcpkg`.
@@ -949,6 +951,7 @@ public:
     static MObject aConventionAxis; // enum: 0=X 1=Y 2=Z
     static MObject aConventionInvert;  // bool
     static MObject aControlMode;    // enum: 0=Manual 1=ROS
+    static MObject aRosCommand;     // double, ROS 모드에서의 기준값 (펌프가 씀)
     static MObject aEnabled;        // bool
 
     // 출력
@@ -994,6 +997,7 @@ MObject MaroAxisNode::aJointName;
 MObject MaroAxisNode::aConventionAxis;
 MObject MaroAxisNode::aConventionInvert;
 MObject MaroAxisNode::aControlMode;
+MObject MaroAxisNode::aRosCommand;
 MObject MaroAxisNode::aEnabled;
 MObject MaroAxisNode::aOutValue;
 MObject MaroAxisNode::aOutTransform;
@@ -1065,6 +1069,12 @@ MStatus MaroAxisNode::initialize() {
     enumFn.setKeyable(true);
     addAttribute(aControlMode);
 
+    // 펌프가 매 프레임 직접 쓰는 값이다. 사용자 구성이 아니므로 씬에 저장하지 않는다.
+    aRosCommand = numFn.create("rosCommand", "rcm", MFnNumericData::kDouble, 0.0);
+    numFn.setStorable(false);
+    numFn.setKeyable(false);
+    addAttribute(aRosCommand);
+
     aEnabled = numFn.create("enabled", "enb", MFnNumericData::kBoolean, 1);
     numFn.setStorable(true);
     numFn.setKeyable(true);
@@ -1081,12 +1091,11 @@ MStatus MaroAxisNode::initialize() {
     matFn.setWritable(false);
     addAttribute(aOutTransform);
 
-    attributeAffects(aConventionAxis, aOutValue);
-    attributeAffects(aConventionInvert, aOutValue);
-    attributeAffects(aEnabled, aOutValue);
-    attributeAffects(aConventionAxis, aOutTransform);
-    attributeAffects(aConventionInvert, aOutTransform);
-    attributeAffects(aEnabled, aOutTransform);
+    for (const MObject& src : {aConventionAxis, aConventionInvert, aEnabled,
+                               aControlMode, aRosCommand}) {
+        attributeAffects(src, aOutValue);
+        attributeAffects(src, aOutTransform);
+    }
 
     return MS::kSuccess;
 }
@@ -1208,7 +1217,10 @@ git commit -m "feat: add maroAxis locator node with binding and convention attri
 
 **Interfaces:**
 - Consumes: `maro::MaroAxisNode` (Task 6)
-- Produces: MEL 커맨드 `maroBindAxis <axisNode> <targetTransform>`. 성공 시 성공 상태, 거부 시 `MS::kFailure` + 사유 출력. C++ 클래스 `MaroBindAxisCommand`.
+- Produces:
+  - MEL 커맨드 `maroBindAxis <axisNode> <targetTransform>` — C++ 클래스 `MaroBindAxisCommand`
+  - MEL 커맨드 `maroConnectAxis <childAxis> <parentAxis>` — C++ 클래스 `MaroConnectAxisCommand`
+  - 둘 다 거부 시 `MS::kFailure`와 사유 출력, 성공 시 undo 가능
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -1259,6 +1271,25 @@ except RuntimeError:
 cmds.undo()
 print("undo OK")
 
+# 5) 축 체인 연결과 순환 거부
+cube2 = cmds.polyCube(name="armSegment2")[0]
+cmds.maroBindAxis(axis2, cube2)
+cmds.maroConnectAxis(axis2, axis)          # axis2 의 부모가 axis
+assert cmds.isConnected(axis + ".message", axis2 + ".parentAxis")
+print("chain connect OK")
+
+try:
+    cmds.maroConnectAxis(axis, axis2)      # axis 의 부모를 axis2 로 -> 순환
+    raise AssertionError("cycle should have been rejected at wiring time")
+except RuntimeError:
+    print("cycle rejected OK")
+
+try:
+    cmds.maroConnectAxis(axis, axis)       # 자기 자신
+    raise AssertionError("self-parenting should have been rejected")
+except RuntimeError:
+    print("self-parent rejected OK")
+
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 maya.standalone.uninitialize()
 print("teardown OK")
@@ -1288,6 +1319,21 @@ namespace maro {
 
 // 어트리뷰트 쓰기는 반드시 커맨드를 경유한다. MDGModifier가 undo/redo를 처리한다.
 class MaroBindAxisCommand : public MPxCommand {
+public:
+    static void* creator();
+    static MSyntax newSyntax();
+
+    MStatus doIt(const MArgList& args) override;
+    MStatus redoIt() override;
+    MStatus undoIt() override;
+    bool isUndoable() const override { return true; }
+
+private:
+    MDGModifier m_modifier;
+};
+
+// 축 체인 연결. 순환은 평가할 때 터지게 두지 않고 연결하는 순간 거부한다.
+class MaroConnectAxisCommand : public MPxCommand {
 public:
     static void* creator();
     static MSyntax newSyntax();
@@ -1412,6 +1458,114 @@ MStatus MaroBindAxisCommand::undoIt() {
     return m_modifier.undoIt();
 }
 
+namespace {
+
+// child 를 parent 아래에 붙이면 순환이 생기는지 본다.
+// parent 에서 조상 방향으로 거슬러 올라가다 child 를 만나면 순환이다.
+bool wouldCreateCycle(const MObject& child, const MObject& parent) {
+    MObject current = parent;
+
+    // 축 개수만큼만 돌면 충분하다. 이미 순환이 있는 씬에서도 멈춘다.
+    for (int guard = 0; guard < 10000; ++guard) {
+        if (current == child) return true;
+
+        MFnDependencyNode fn(current);
+        MPlug parentPlug = fn.findPlug(MaroAxisNode::aParentAxis, false);
+
+        MPlugArray sources;
+        parentPlug.connectedTo(sources, true, false);
+        if (sources.length() == 0) return false;
+
+        current = sources[0].node();
+    }
+    return true;   // 상한에 걸렸다면 이미 순환이다
+}
+
+}  // namespace
+
+void* MaroConnectAxisCommand::creator() {
+    return new MaroConnectAxisCommand();
+}
+
+MSyntax MaroConnectAxisCommand::newSyntax() {
+    MSyntax syntax;
+    syntax.setObjectType(MSyntax::kSelectionList, 2, 2);
+    return syntax;
+}
+
+MStatus MaroConnectAxisCommand::doIt(const MArgList& args) {
+    MStatus status;
+
+    MSelectionList selection;
+    for (unsigned int i = 0; i < args.length(); ++i) {
+        MString name = args.asString(i, &status);
+        if (!status) return status;
+        if (!selection.add(name)) {
+            MGlobal::displayError(MString("Maro: cannot find node '") + name + "'.");
+            return MS::kFailure;
+        }
+    }
+
+    if (selection.length() != 2) {
+        MGlobal::displayError(
+            "Maro: maroConnectAxis needs exactly two arguments: <child> <parent>.");
+        return MS::kFailure;
+    }
+
+    MObject childObj;
+    MObject parentObj;
+    selection.getDependNode(0, childObj);
+    selection.getDependNode(1, parentObj);
+
+    MFnDependencyNode childFn(childObj);
+    MFnDependencyNode parentFn(parentObj);
+
+    if (childFn.typeId() != MaroAxisNode::id ||
+        parentFn.typeId() != MaroAxisNode::id) {
+        MGlobal::displayError("Maro: maroConnectAxis expects two maroAxis nodes.");
+        return MS::kFailure;
+    }
+
+    if (childObj == parentObj) {
+        MGlobal::displayError(
+            MString("Maro: '") + childFn.name() + "' cannot be its own parent.");
+        return MS::kFailure;
+    }
+
+    if (wouldCreateCycle(childObj, parentObj)) {
+        MGlobal::displayError(
+            MString("Maro: connecting '") + childFn.name() + "' under '" +
+            parentFn.name() + "' would create a cycle in the axis chain.");
+        return MS::kFailure;
+    }
+
+    MPlug parentMessage = parentFn.findPlug("message", false, &status);
+    if (!status) return status;
+    MPlug childParent = childFn.findPlug(MaroAxisNode::aParentAxis, false, &status);
+    if (!status) return status;
+
+    // 부모는 하나뿐이다. 기존 연결이 있으면 끊고 새로 잇는다.
+    MPlugArray existing;
+    childParent.connectedTo(existing, true, false);
+    for (unsigned int i = 0; i < existing.length(); ++i) {
+        status = m_modifier.disconnect(existing[i], childParent);
+        if (!status) return status;
+    }
+
+    status = m_modifier.connect(parentMessage, childParent);
+    if (!status) return status;
+
+    return redoIt();
+}
+
+MStatus MaroConnectAxisCommand::redoIt() {
+    return m_modifier.doIt();
+}
+
+MStatus MaroConnectAxisCommand::undoIt() {
+    return m_modifier.undoIt();
+}
+
 }  // namespace maro
 ```
 
@@ -1428,11 +1582,21 @@ MStatus MaroBindAxisCommand::undoIt() {
         status.perror("Maro: failed to register maroBindAxis");
         return status;
     }
+
+    status = plugin.registerCommand(
+        "maroConnectAxis",
+        maro::MaroConnectAxisCommand::creator,
+        maro::MaroConnectAxisCommand::newSyntax);
+    if (!status) {
+        status.perror("Maro: failed to register maroConnectAxis");
+        return status;
+    }
 ```
 
 `uninitializePlugin`의 `deregisterNode` 앞에 넣는다.
 
 ```cpp
+    plugin.deregisterCommand("maroConnectAxis");
     plugin.deregisterCommand("maroBindAxis");
 ```
 
@@ -1444,13 +1608,13 @@ MStatus MaroBindAxisCommand::undoIt() {
 cmake --build out/build && MARO_PLUGIN_PATH="$(cygpath -w "$(find out/build -name maro.mll | head -1)")" "/c/Program Files/Autodesk/Maya2026/bin/mayapy.exe" tests/maya/test_binding.py
 ```
 
-기대: `bind OK`, `duplicate bind rejected OK`, `non-transform bind rejected OK`, `undo OK`, `teardown OK`.
+기대: `bind OK`, `duplicate bind rejected OK`, `non-transform bind rejected OK`, `undo OK`, `chain connect OK`, `cycle rejected OK`, `self-parent rejected OK`, `teardown OK`.
 
 - [ ] **Step 7: 커밋**
 
 ```bash
 git add src/maro_plugin tests/maya/test_binding.py
-git commit -m "feat: add maroBindAxis command with constraint checks at wiring time"
+git commit -m "feat: reject invalid bindings and axis-chain cycles at wiring time"
 ```
 
 ---
@@ -1922,6 +2086,9 @@ MStatus MaroAxisNode::compute(const MPlug& plug, MDataBlock& data) {
             const unsigned int component =
                 (axisIndex == 0) ? 0u : ((axisIndex == 2) ? 2u : 1u);
 
+            // 모드가 기준값의 출처를 정한다. 리밋은 어느 쪽이든 똑같이 적용된다.
+            const bool rosDriven = data.inputValue(aControlMode).asShort() == 1;
+
             MArrayDataHandle stack = data.inputArrayValue(aCapabilityIn);
 
             for (unsigned int i = 0; i < stack.elementCount(); ++i) {
@@ -1931,7 +2098,8 @@ MStatus MaroAxisNode::compute(const MPlug& plug, MDataBlock& data) {
                 const short capType = element.child(aCapType).asShort();
 
                 if (capType == 0) {           // rotation
-                    value = element.child(aCapValue).asDouble();
+                    value = rosDriven ? data.inputValue(aRosCommand).asDouble()
+                                      : element.child(aCapValue).asDouble();
                 } else if (capType == 1) {    // limit
                     const short3& enable = element.child(aCapEnable).asShort3();
                     if (enable[component] != 0) {
@@ -2360,23 +2528,32 @@ git commit -m "feat: cascade axis deletion with undo, keep capability nodes as r
 
 # Phase 3 — ROS 2 런타임
 
-## Task 10: 큐와 백그라운드 rclcpp 스레드
+## Task 10: 큐, 백그라운드 스레드, 메인 스레드 펌프, 브리지 커맨드
+
+이 태스크가 끝나면 **DG에서 큐를 거쳐 백그라운드 스레드까지 데이터가 실제로 흐른다.** 발행 내용이 없어도 왕복이 관측 가능하므로, 이후 Task 11·12는 이미 도는 파이프라인 위에 얹는 형태가 된다.
 
 **Files:**
 - Create: `src/maro_plugin/MaroBridgeQueues.h`
 - Create: `src/maro_plugin/MaroRosRuntime.h`
 - Create: `src/maro_plugin/MaroRosRuntime.cpp`
+- Create: `src/maro_plugin/MaroPump.h`
+- Create: `src/maro_plugin/MaroPump.cpp`
+- Modify: `src/maro_plugin/MaroCommands.h`
+- Modify: `src/maro_plugin/MaroCommands.cpp`
 - Modify: `src/maro_plugin/CMakeLists.txt`
 - Modify: `src/maro_plugin/MaroPluginMain.cpp`
-- Test: `tests/maya/test_runtime_lifecycle.py`
+- Test: `tests/maya/test_bridge_pump.py`
 
 **Interfaces:**
-- Consumes: `maro::Vec3`, `maro::Quat`, `maro::AxisConvention`, `maro::SceneUnit` (Task 1)
+- Consumes: `maro::Vec3`, `maro::Quat`, `maro::AxisConvention`, `maro::SceneUnit` (Task 1), `maro::MaroAxisNode` (Task 6)
 - Produces:
   - `maro::AxisSample { std::string jointName; double value; Vec3 position; Quat rotation; AxisConvention convention; SceneUnit unit; }`
-  - `maro::AxisCommand { std::string jointName; double mayaValue; }`
-  - `maro::BoundedQueue<T>` — `push`, `drain`, 상한 초과 시 오래된 항목 폐기
-  - `maro::MaroRosRuntime` — `start(robotName)`, `stop()`, `publishQueue()`, `commandQueue()`
+  - `maro::AxisCommand { std::string jointName; double rosValue; }`
+  - `maro::BoundedQueue<T>` — `push`, `drain`, `droppedCount`, 상한 초과 시 오래된 항목 폐기
+  - `maro::MaroRosRuntime` — `start(robotName)`, `stop()`, `isRunning()`, `publishQueue()`, `commandQueue()`, `drainedSampleCount()`
+  - `maro::MaroPump` — `start(MaroRosRuntime&)`, `stop()`, `collectedSampleCount()`, `appliedCommandCount()`
+  - MEL 커맨드 `maroStartBridge <robotName>`, `maroStopBridge`, `maroBridgeStats`
+  - `maroBridgeStats`는 `[collectedSamples, drainedSamples, appliedCommands]` 정수 배열을 돌려준다
 
 - [ ] **Step 1: 큐 헤더 작성**
 
@@ -2406,10 +2583,12 @@ struct AxisSample {
     SceneUnit unit;
 };
 
-// 백그라운드 -> 메인 스레드. 이미 Maya 좌표로 변환된 값이다.
+// 백그라운드 -> 메인 스레드. 관절 스칼라값은 좌표계 변환 대상이 아니므로
+// (스칼라 각도에는 기저 변환이 적용되지 않는다) 그대로 전달한다.
+// 축 보정에 의한 부호 반전은 축의 conventionInvert가 담당한다.
 struct AxisCommand {
     std::string jointName;
-    double mayaValue = 0.0;
+    double rosValue = 0.0;
 };
 
 // 상한이 있는 큐. 넘치면 오래된 것부터 버린다.
@@ -2488,6 +2667,10 @@ public:
     BoundedQueue<AxisSample>& publishQueue() { return m_publishQueue; }
     BoundedQueue<AxisCommand>& commandQueue() { return m_commandQueue; }
 
+    // 펌프가 넣은 샘플이 백그라운드까지 실제로 건너왔는지 보기 위한 계수기.
+    // 발행이 붙기 전에도 스레드 경계를 넘는 흐름을 관측할 수 있다.
+    std::uint64_t drainedSampleCount() const { return m_drainedSamples.load(); }
+
 private:
     void spinLoop();
 
@@ -2497,6 +2680,7 @@ private:
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stopRequested{false};
+    std::atomic<std::uint64_t> m_drainedSamples{0};
 
     BoundedQueue<AxisSample> m_publishQueue;
     BoundedQueue<AxisCommand> m_commandQueue;
@@ -2573,6 +2757,12 @@ void MaroRosRuntime::spinLoop() {
     try {
         while (!m_stopRequested.load() && rclcpp::ok()) {
             rclcpp::spin_some(m_impl->node);
+
+            // 펌프가 넣은 샘플을 꺼낸다. 발행은 Task 11에서 붙는다.
+            // 지금은 건너온 개수만 세어 흐름을 관측 가능하게 한다.
+            const std::vector<AxisSample> samples = m_publishQueue.drain();
+            m_drainedSamples.fetch_add(samples.size(), std::memory_order_relaxed);
+
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     } catch (...) {
@@ -2584,7 +2774,362 @@ void MaroRosRuntime::spinLoop() {
 }  // namespace maro
 ```
 
-- [ ] **Step 4: 플러그인 빌드에 ROS 2 링크 추가**
+- [ ] **Step 4: 메인 스레드 펌프 작성**
+
+`src/maro_plugin/MaroPump.h`:
+
+```cpp
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+
+#include <maya/MCallbackIdArray.h>
+#include <maya/MStatus.h>
+
+namespace maro {
+
+class MaroRosRuntime;
+
+// Maya 메인 스레드에서만 도는 펌프. 여기가 DG와 큐가 만나는 유일한 지점이다.
+//   1) 큐에서 명령을 꺼내 DG에 반영
+//   2) DG에서 축 상태를 읽어 큐에 적재
+// 변환에 필요한 컨텍스트(씬 단위, 축 보정)는 Maya 조회가 필요하므로
+// 여기서 읽어 샘플에 함께 실어 보낸다. 백그라운드는 Maya를 조회하지 않는다.
+class MaroPump {
+public:
+    static MStatus start(MaroRosRuntime& runtime);
+    static MStatus stop();
+    static bool isRunning();
+
+    static std::uint64_t collectedSampleCount();
+    static std::uint64_t appliedCommandCount();
+
+private:
+    static void onTimer(float elapsed, float last, void* clientData);
+    static void applyCommands(MaroRosRuntime& runtime);
+    static void collectSamples(MaroRosRuntime& runtime);
+
+    static MCallbackId s_timerId;
+    static MaroRosRuntime* s_runtime;
+    static std::atomic<std::uint64_t> s_collected;
+    static std::atomic<std::uint64_t> s_applied;
+};
+
+}  // namespace maro
+```
+
+`src/maro_plugin/MaroPump.cpp`:
+
+```cpp
+#include "MaroPump.h"
+
+#include <cmath>
+#include <string>
+#include <unordered_map>
+
+#include <maya/MDistance.h>
+#include <maya/MFnDependencyNode.h>
+#include <maya/MGlobal.h>
+#include <maya/MItDependencyNodes.h>
+#include <maya/MPlug.h>
+#include <maya/MTimerMessage.h>
+
+#include "MaroAxisNode.h"
+#include "MaroRosRuntime.h"
+
+namespace maro {
+
+MCallbackId MaroPump::s_timerId = 0;
+MaroRosRuntime* MaroPump::s_runtime = nullptr;
+std::atomic<std::uint64_t> MaroPump::s_collected{0};
+std::atomic<std::uint64_t> MaroPump::s_applied{0};
+
+namespace {
+
+constexpr float kPumpIntervalSeconds = 1.0f / 30.0f;
+
+// Maya의 현재 선형 단위를 미터 배율로 바꾼다.
+// 하드코딩하면 사용자가 단위를 바꿨을 때 로봇이 100배로 나온다.
+SceneUnit currentSceneUnit() {
+    SceneUnit unit;
+    unit.metersPerMayaUnit = MDistance(1.0, MDistance::internalUnit())
+                                 .asMeters();
+    return unit;
+}
+
+AxisConvention conventionOf(const MFnDependencyNode& axisFn) {
+    AxisConvention conv;
+    const short axisIndex =
+        axisFn.findPlug(MaroAxisNode::aConventionAxis, false).asShort();
+    conv.axis = (axisIndex == 0) ? LocalAxis::X
+                                 : ((axisIndex == 2) ? LocalAxis::Z : LocalAxis::Y);
+    conv.invert = axisFn.findPlug(MaroAxisNode::aConventionInvert, false).asBool();
+    return conv;
+}
+
+}  // namespace
+
+MStatus MaroPump::start(MaroRosRuntime& runtime) {
+    if (s_timerId != 0) return MS::kSuccess;
+
+    s_runtime = &runtime;
+    s_collected.store(0);
+    s_applied.store(0);
+
+    MStatus status;
+    s_timerId = MTimerMessage::addTimerCallback(kPumpIntervalSeconds, onTimer,
+                                                nullptr, &status);
+    if (!status) {
+        s_runtime = nullptr;
+        s_timerId = 0;
+    }
+    return status;
+}
+
+MStatus MaroPump::stop() {
+    if (s_timerId != 0) {
+        MMessage::removeCallback(s_timerId);
+        s_timerId = 0;
+    }
+    s_runtime = nullptr;
+    return MS::kSuccess;
+}
+
+bool MaroPump::isRunning() { return s_timerId != 0; }
+
+std::uint64_t MaroPump::collectedSampleCount() { return s_collected.load(); }
+std::uint64_t MaroPump::appliedCommandCount() { return s_applied.load(); }
+
+void MaroPump::onTimer(float, float, void*) {
+    // Maya 콜백이다. 예외가 새면 Maya가 죽는다.
+    try {
+        if (s_runtime == nullptr) return;
+        applyCommands(*s_runtime);
+        collectSamples(*s_runtime);
+    } catch (const std::exception& e) {
+        MGlobal::displayError(MString("Maro: pump tick failed: ") + e.what());
+    } catch (...) {
+        MGlobal::displayError("Maro: pump tick failed with unknown error.");
+    }
+}
+
+void MaroPump::applyCommands(MaroRosRuntime& runtime) {
+    const std::vector<AxisCommand> commands = runtime.commandQueue().drain();
+    if (commands.empty()) return;
+
+    // 같은 관절에 여러 명령이 쌓였다면 최신 것만 의미가 있다.
+    std::unordered_map<std::string, double> latest;
+    for (const AxisCommand& cmd : commands) {
+        latest[cmd.jointName] = cmd.rosValue;
+    }
+
+    for (MItDependencyNodes it(MFn::kPluginLocatorNode); !it.isDone(); it.next()) {
+        MFnDependencyNode axisFn(it.thisNode());
+        if (axisFn.typeId() != MaroAxisNode::id) continue;
+
+        // Manual 축은 외부 명령을 받지 않는다.
+        if (axisFn.findPlug(MaroAxisNode::aControlMode, false).asShort() != 1) {
+            continue;
+        }
+
+        const std::string joint =
+            axisFn.findPlug(MaroAxisNode::aJointName, false).asString().asChar();
+        const auto found = latest.find(joint);
+        if (found == latest.end()) continue;
+
+        // NaN/inf를 Maya에 흘리지 않는다.
+        if (!std::isfinite(found->second)) continue;
+
+        // 런타임 데이터 흐름이므로 직접 쓴다. undo 스택에 남기지 않는다.
+        axisFn.findPlug(MaroAxisNode::aRosCommand, false)
+            .setDouble(found->second);
+        s_applied.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void MaroPump::collectSamples(MaroRosRuntime& runtime) {
+    const SceneUnit unit = currentSceneUnit();
+
+    for (MItDependencyNodes it(MFn::kPluginLocatorNode); !it.isDone(); it.next()) {
+        MFnDependencyNode axisFn(it.thisNode());
+        if (axisFn.typeId() != MaroAxisNode::id) continue;
+        if (!axisFn.findPlug(MaroAxisNode::aEnabled, false).asBool()) continue;
+
+        const MString joint =
+            axisFn.findPlug(MaroAxisNode::aJointName, false).asString();
+        if (joint.length() == 0) continue;   // 이름 없는 축은 발행하지 않는다
+
+        AxisSample sample;
+        sample.jointName = joint.asChar();
+        sample.value = axisFn.findPlug(MaroAxisNode::aOutValue, false).asDouble();
+        sample.convention = conventionOf(axisFn);
+        sample.unit = unit;
+
+        if (!std::isfinite(sample.value)) continue;
+
+        runtime.publishQueue().push(std::move(sample));
+        s_collected.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+}  // namespace maro
+```
+
+- [ ] **Step 5: 브리지 시작/정지/상태 커맨드 작성**
+
+`MaroCommands.h`의 `MaroConnectAxisCommand` 아래에 추가한다.
+
+```cpp
+// 브리지 제어. 사용자가 Maya 안에서 ROS 2 연동을 켜고 끄는 유일한 경로다.
+class MaroStartBridgeCommand : public MPxCommand {
+public:
+    static void* creator();
+    static MSyntax newSyntax();
+    MStatus doIt(const MArgList& args) override;
+};
+
+class MaroStopBridgeCommand : public MPxCommand {
+public:
+    static void* creator();
+    MStatus doIt(const MArgList& args) override;
+};
+
+// 펌프와 백그라운드 스레드가 실제로 일하고 있는지 보는 진단 커맨드.
+class MaroBridgeStatsCommand : public MPxCommand {
+public:
+    static void* creator();
+    MStatus doIt(const MArgList& args) override;
+};
+
+// 플러그인 언로드 시 브리지를 확실히 내린다.
+void shutdownBridge();
+```
+
+`MaroCommands.cpp` 끝(`}  // namespace maro` 앞)에 추가한다. 상단 include에 `#include "MaroPump.h"`, `#include "MaroRosRuntime.h"`, `#include <maya/MIntArray.h>`, `#include <memory>`를 더한다.
+
+```cpp
+namespace {
+std::unique_ptr<MaroRosRuntime> g_runtime;
+}  // namespace
+
+void shutdownBridge() {
+    MaroPump::stop();          // 콜백을 먼저 뗀다. 남기면 언로드 후 즉사한다.
+    if (g_runtime) {
+        g_runtime->stop();
+        g_runtime.reset();
+    }
+}
+
+void* MaroStartBridgeCommand::creator() { return new MaroStartBridgeCommand(); }
+
+MSyntax MaroStartBridgeCommand::newSyntax() {
+    MSyntax syntax;
+    syntax.setObjectType(MSyntax::kStringObjects, 1, 1);
+    return syntax;
+}
+
+MStatus MaroStartBridgeCommand::doIt(const MArgList& args) {
+    if (args.length() != 1) {
+        MGlobal::displayError("Maro: maroStartBridge needs <robotName>.");
+        return MS::kFailure;
+    }
+
+    MStatus status;
+    const MString robotName = args.asString(0, &status);
+    if (!status) return status;
+
+    if (g_runtime && g_runtime->isRunning()) {
+        MGlobal::displayWarning("Maro: bridge is already running.");
+        return MS::kSuccess;
+    }
+
+    g_runtime = std::make_unique<MaroRosRuntime>();
+    if (!g_runtime->start(robotName.asChar())) {
+        g_runtime.reset();
+        MGlobal::displayError(
+            "Maro: could not start the ROS 2 bridge. Check that the ROS 2 "
+            "runtime DLLs sit next to the plugin.");
+        return MS::kFailure;
+    }
+
+    status = MaroPump::start(*g_runtime);
+    if (!status) {
+        g_runtime->stop();
+        g_runtime.reset();
+        MGlobal::displayError("Maro: could not start the main-thread pump.");
+        return status;
+    }
+
+    MGlobal::displayInfo(MString("Maro: bridge running as '") + robotName + "'.");
+    return MS::kSuccess;
+}
+
+void* MaroStopBridgeCommand::creator() { return new MaroStopBridgeCommand(); }
+
+MStatus MaroStopBridgeCommand::doIt(const MArgList&) {
+    shutdownBridge();
+    MGlobal::displayInfo("Maro: bridge stopped.");
+    return MS::kSuccess;
+}
+
+void* MaroBridgeStatsCommand::creator() { return new MaroBridgeStatsCommand(); }
+
+MStatus MaroBridgeStatsCommand::doIt(const MArgList&) {
+    MIntArray stats;
+    stats.append(static_cast<int>(MaroPump::collectedSampleCount()));
+    stats.append(static_cast<int>(
+        g_runtime ? g_runtime->drainedSampleCount() : 0));
+    stats.append(static_cast<int>(MaroPump::appliedCommandCount()));
+    setResult(stats);
+    return MS::kSuccess;
+}
+```
+
+- [ ] **Step 6: 커맨드 등록과 언로드 정리**
+
+`MaroPluginMain.cpp`의 `maroConnectAxis` 등록 뒤에 넣는다.
+
+```cpp
+    status = plugin.registerCommand("maroStartBridge",
+                                    maro::MaroStartBridgeCommand::creator,
+                                    maro::MaroStartBridgeCommand::newSyntax);
+    if (!status) {
+        status.perror("Maro: failed to register maroStartBridge");
+        return status;
+    }
+
+    status = plugin.registerCommand("maroStopBridge",
+                                    maro::MaroStopBridgeCommand::creator);
+    if (!status) {
+        status.perror("Maro: failed to register maroStopBridge");
+        return status;
+    }
+
+    status = plugin.registerCommand("maroBridgeStats",
+                                    maro::MaroBridgeStatsCommand::creator);
+    if (!status) {
+        status.perror("Maro: failed to register maroBridgeStats");
+        return status;
+    }
+```
+
+`uninitializePlugin`의 맨 앞(삭제 감시자 해제와 나란히)에 넣는다. 순서가 중요하다 — 브리지를 먼저 내려야 타이머 콜백이 사라진 노드를 건드리지 않는다.
+
+```cpp
+    maro::shutdownBridge();
+    maro::MaroDeleteWatcher::uninstall();
+```
+
+그리고 커맨드 역등록을 추가한다.
+
+```cpp
+    plugin.deregisterCommand("maroBridgeStats");
+    plugin.deregisterCommand("maroStopBridge");
+    plugin.deregisterCommand("maroStartBridge");
+```
+
+- [ ] **Step 7: 플러그인 빌드에 ROS 2 링크 추가**
 
 `src/maro_plugin/CMakeLists.txt`를 아래로 교체한다. `build_plugin()`이 `INCLUDE_DIRS`/`LIBRARY_DIRS`/`LIBRARIES`를 읽으므로 호출 전에 채운다.
 
@@ -2600,6 +3145,7 @@ set(SOURCE_FILES
     MaroCommands.cpp
     MaroDeleteWatcher.cpp
     MaroRosRuntime.cpp
+    MaroPump.cpp
 )
 
 set(LIBRARIES
@@ -2660,18 +3206,20 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 )
 ```
 
-- [ ] **Step 5: 런타임 수명 테스트 작성**
+- [ ] **Step 8: 펌프 흐름과 수명 테스트 작성**
 
-`tests/maya/test_runtime_lifecycle.py`:
+`tests/maya/test_bridge_pump.py`:
 
 ```python
-"""플러그인이 ROS 2를 링크한 상태에서도 깨끗이 언로드되고 프로세스가 끝나는지 확인.
+"""브리지를 켜면 DG -> 큐 -> 백그라운드 스레드로 데이터가 실제로 흐르는지,
+그리고 내린 뒤 프로세스가 깨끗이 끝나는지 확인한다.
 
 §12에서 퍼블리셔 누수로 프로세스가 종료되지 않는 결함이 실제로 있었다.
 이 테스트가 그 회귀를 막는다.
 """
 import os
 import sys
+import time
 
 import maya.standalone
 
@@ -2682,34 +3230,76 @@ import maya.cmds as cmds  # noqa: E402
 plugin = os.environ["MARO_PLUGIN_PATH"]
 name = os.path.splitext(os.path.basename(plugin))[0]
 
-for i in range(3):
-    cmds.loadPlugin(plugin)
-    assert cmds.pluginInfo(plugin, query=True, loaded=True)
-    cmds.unloadPlugin(name)
-    print(f"load/unload cycle {i} OK")
+cmds.loadPlugin(plugin)
+cmds.file(new=True, force=True)
+
+# 이름 있는 축 하나를 세운다. 이름이 없으면 펌프가 건너뛴다.
+cube = cmds.polyCube(name="seg")[0]
+axis = cmds.createNode("maroAxis", name="axisP")
+cmds.maroBindAxis(axis, cube)
+cmds.setAttr(axis + ".jointName", "axisP", type="string")
+rot = cmds.createNode("maroRotation")
+cmds.connectAttr(rot + ".capabilityOut", axis + ".capabilityIn[0]")
+cmds.setAttr(rot + ".angle", 0.4)
+
+# 브리지를 켜기 전에는 아무것도 흐르지 않는다.
+collected, drained, applied = cmds.maroBridgeStats()
+assert collected == 0 and drained == 0, "nothing should flow before the bridge starts"
+print("idle stats OK")
+
+cmds.maroStartBridge("maro")
+
+# 펌프는 마야 타이머로 돌므로 유휴 이벤트를 흘려 주며 기다린다.
+deadline = time.time() + 20
+while time.time() < deadline:
+    cmds.refresh(force=True)
+    time.sleep(0.1)
+    collected, drained, applied = cmds.maroBridgeStats()
+    if collected > 0 and drained > 0:
+        break
+
+assert collected > 0, "pump never collected a sample from the DG"
+assert drained > 0, "samples never reached the background thread"
+print(f"pump flow OK (collected={collected}, drained={drained})")
+
+cmds.maroStopBridge()
+collected_after = cmds.maroBridgeStats()[0]
+time.sleep(0.5)
+cmds.refresh(force=True)
+time.sleep(0.5)
+assert cmds.maroBridgeStats()[0] == collected_after, \
+    "pump kept running after maroStopBridge"
+print("stop halts the pump OK")
+
+# 브리지를 켠 채로 언로드해도 좀비 스레드가 남지 않아야 한다.
+cmds.maroStartBridge("maro")
+cmds.unloadPlugin(name)
+print("unload while running OK")
 
 maya.standalone.uninitialize()
 print("teardown OK")
 sys.exit(0)
 ```
 
-- [ ] **Step 6: 빌드하고 수명 테스트 실행**
+- [ ] **Step 9: 빌드하고 펌프 테스트 실행**
 
 ```bash
 cmake --build out/build
 ```
 
 ```bash
-MARO_PLUGIN_PATH="$(cygpath -w "$(find out/build -name maro.mll | head -1)")" timeout 120 "/c/Program Files/Autodesk/Maya2026/bin/mayapy.exe" tests/maya/test_runtime_lifecycle.py; echo "exit=$?"
+MARO_PLUGIN_PATH="$(cygpath -w "$(find out/build -name maro.mll | head -1)")" timeout 180 "/c/Program Files/Autodesk/Maya2026/bin/mayapy.exe" tests/maya/test_bridge_pump.py; echo "exit=$?"
 ```
 
-기대: 3회 로드/언로드 후 `teardown OK`, `exit=0`. `exit=124`면 프로세스가 끝나지 않은 것이므로 정리 순서를 고치기 전에 진행하지 않는다.
+기대: `idle stats OK`, `pump flow OK (collected=N, drained=M)` (둘 다 0보다 큼), `stop halts the pump OK`, `unload while running OK`, `teardown OK`, `exit=0`.
 
-- [ ] **Step 7: 커밋**
+`exit=124`면 프로세스가 끝나지 않은 것이다. `shutdownBridge()`의 해제 순서(펌프 콜백 → 런타임 정지 → 노드 해제 → `rclcpp::shutdown`)를 고치기 전에는 다음 태스크로 넘어가지 않는다.
+
+- [ ] **Step 10: 커밋**
 
 ```bash
-git add src/maro_plugin tests/maya/test_runtime_lifecycle.py
-git commit -m "feat: run rclcpp on a background thread behind two bounded queues"
+git add src/maro_plugin tests/maya/test_bridge_pump.py
+git commit -m "feat: pump DG state through bounded queues to the rclcpp thread"
 ```
 
 ---
@@ -2881,7 +3471,7 @@ cmake --build out/build && ./out/build/tests/maro_test_peer.exe echo testbot 1 3
 
 - [ ] **Step 3: 런타임에 발행 기능 추가**
 
-`MaroRosRuntime.h`의 `private:` 섹션 위에 선언을 추가한다.
+`MaroRosRuntime.h`의 `private:` 섹션 아래, `spinLoop()` 선언 옆에 추가한다.
 
 ```cpp
     // 메인 스레드가 채운 샘플을 백그라운드에서 변환·발행한다.
@@ -2925,18 +3515,29 @@ struct MaroRosRuntime::Impl {
     m_impl->jointPub.reset();
 ```
 
-`spinLoop()`의 `spin_some` 뒤에 발행 호출을 넣는다.
+`spinLoop()`에서 Task 10의 "세기만 하는" 드레인을 발행으로 교체한다.
 
 ```cpp
+            // Task 10에서는 개수만 셌다. 이제 실제로 발행한다.
             drainAndPublish();
 ```
 
-구현을 추가한다.
+즉 아래 두 줄을 지우고 위 호출로 바꾼다.
+
+```cpp
+            const std::vector<AxisSample> samples = m_publishQueue.drain();
+            m_drainedSamples.fetch_add(samples.size(), std::memory_order_relaxed);
+```
+
+구현을 추가한다. 계수기는 그대로 올려야 `maroBridgeStats`와 Task 10의 테스트가 계속 유효하다.
 
 ```cpp
 void MaroRosRuntime::drainAndPublish() {
     const std::vector<AxisSample> samples = m_publishQueue.drain();
     if (samples.empty()) return;
+
+    m_drainedSamples.fetch_add(samples.size(), std::memory_order_relaxed);
+
     if (!m_impl->jointPub || !m_impl->tfPub) return;
 
     sensor_msgs::msg::JointState joints;
@@ -2970,15 +3571,81 @@ void MaroRosRuntime::drainAndPublish() {
 }
 ```
 
-- [ ] **Step 4: 빌드해서 컴파일이 통과하는지 확인**
+- [ ] **Step 4: 실제 발행을 검증하는 테스트 작성**
+
+`tests/maya/test_publish.py`:
+
+```python
+"""Maya 안의 축 상태가 ROS 2 토픽으로 실제로 나가는지 확인한다.
+
+별도 프로세스의 C++ 피어가 구독해 값을 받아야 통과한다.
+"""
+import os
+import subprocess
+import sys
+import time
+
+import maya.standalone
+
+maya.standalone.initialize(name="python")
+
+import maya.cmds as cmds  # noqa: E402
+
+plugin = os.environ["MARO_PLUGIN_PATH"]
+peer = os.environ["MARO_PEER_PATH"]
+
+cmds.loadPlugin(plugin)
+cmds.file(new=True, force=True)
+
+cube = cmds.polyCube(name="seg")[0]
+axis = cmds.createNode("maroAxis", name="axisPub")
+cmds.maroBindAxis(axis, cube)
+cmds.setAttr(axis + ".jointName", "axisPub", type="string")
+rot = cmds.createNode("maroRotation")
+cmds.connectAttr(rot + ".capabilityOut", axis + ".capabilityIn[0]")
+cmds.setAttr(rot + ".angle", 0.75)
+
+cmds.maroStartBridge("maro")
+
+# 피어를 구독자로 띄워 두고, 그동안 마야를 계속 돌려 펌프가 뛰게 한다.
+listener = subprocess.Popen([peer, "echo", "maro", "1", "25"],
+                            stdout=subprocess.PIPE, text=True)
+
+deadline = time.time() + 25
+while time.time() < deadline and listener.poll() is None:
+    cmds.refresh(force=True)
+    time.sleep(0.1)
+
+out, _ = listener.communicate(timeout=10)
+print(out)
+
+assert listener.returncode == 0, "peer never received joint_states"
+assert "axisPub" in out, f"joint name missing from published message:\n{out}"
+assert "0.75" in out, f"joint value not published as expected:\n{out}"
+print("publish round trip OK")
+
+cmds.maroStopBridge()
+cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
+maya.standalone.uninitialize()
+print("teardown OK")
+sys.exit(0)
+```
+
+- [ ] **Step 5: 빌드하고 발행 테스트 실행**
 
 ```bash
 cmake --build out/build
 ```
 
-기대: 오류 없이 `maro.mll`과 `maro_test_peer.exe` 생성.
+```bash
+MARO_PLUGIN_PATH="$(cygpath -w "$(find out/build -name maro.mll | head -1)")" MARO_PEER_PATH="$(cygpath -w "$(find out/build -name maro_test_peer.exe | head -1)")" timeout 300 "/c/Program Files/Autodesk/Maya2026/bin/mayapy.exe" tests/maya/test_publish.py; echo "exit=$?"
+```
 
-- [ ] **Step 5: 커밋**
+기대: 피어가 `joint axisPub = 0.75`를 출력하고 `publish round trip OK`, `teardown OK`, `exit=0`.
+
+받지 못하면 순서대로 확인한다 — `maroBridgeStats`의 collected가 0이면 펌프가 축을 못 찾는 것(`jointName` 미설정), drained가 0이면 스레드 경계 문제, 둘 다 0이 아닌데 피어가 못 받으면 토픽 이름이나 DDS 문제다.
+
+- [ ] **Step 6: 커밋**
 
 ```bash
 git add src/maro_plugin tests
@@ -3031,21 +3698,61 @@ cmds.setAttr(axis + ".jointName", "axisA", type="string")
 
 rot = cmds.createNode("maroRotation")
 cmds.connectAttr(rot + ".capabilityOut", axis + ".capabilityIn[0]")
+cmds.setAttr(rot + ".angle", 0.2)
 
-# 기본은 Manual이므로 외부 명령이 축을 움직이면 안 된다.
-assert cmds.getAttr(axis + ".controlMode") == 0
-before = cmds.getAttr(rot + ".angle")
-subprocess.run([peer, "pub", "maro", "axisA", "1.2"], check=True, timeout=60)
-time.sleep(0.5)
-assert abs(cmds.getAttr(rot + ".angle") - before) < 1e-9, \
-    "Manual axis must ignore incoming commands"
+cmds.maroStartBridge("maro")
+
+
+def pump_for(seconds):
+    """마야를 계속 돌려 타이머 펌프가 뛰게 한다."""
+    end = time.time() + seconds
+    while time.time() < end:
+        cmds.refresh(force=True)
+        time.sleep(0.05)
+
+
+def publish_command(value):
+    subprocess.run([peer, "pub", "maro", "axisA", str(value)],
+                   check=True, timeout=120)
+
+
+# 1) Manual 축은 명령이 실제로 도착해도 움직이지 않는다.
+assert cmds.getAttr(axis + ".controlMode") == 0, "default must be Manual"
+publish_command(1.2)
+pump_for(3)
+
+assert abs(cmds.getAttr(axis + ".outValue") - 0.2) < 1e-6, \
+    "Manual axis moved despite ignoring commands"
 print("manual ignores command OK")
 
-# ROS 모드로 바꾸면 반영된다.
+# 명령이 실제로 도착은 했는지 확인한다. 0이면 위 검증이 무의미하다.
+applied_before = cmds.maroBridgeStats()[2]
+
+# 2) ROS 모드로 바꾸면 반영된다.
 cmds.maroSetControlMode(axis, 1)
 assert cmds.getAttr(axis + ".controlMode") == 1
-print("mode switch OK")
+publish_command(1.2)
+pump_for(5)
 
+assert cmds.maroBridgeStats()[2] > applied_before, \
+    "no command was applied after switching to ROS mode"
+assert abs(cmds.getAttr(axis + ".outValue") - 1.2) < 1e-6, \
+    f"ROS command not reflected; outValue={cmds.getAttr(axis + '.outValue')}"
+print("ros mode applies command OK")
+
+# 3) 리밋은 모드와 무관하게 적용된다.
+lim = cmds.createNode("maroLimit")
+cmds.setAttr(lim + ".enableY", True)
+cmds.setAttr(lim + ".minY", -0.5)
+cmds.setAttr(lim + ".maxY", 0.5)
+cmds.connectAttr(lim + ".capabilityOut", axis + ".capabilityIn[1]")
+pump_for(2)
+
+assert abs(cmds.getAttr(axis + ".outValue") - 0.5) < 1e-6, \
+    "limit did not clamp a ROS-driven value"
+print("limit clamps ros value OK")
+
+cmds.maroStopBridge()
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 maya.standalone.uninitialize()
 print("teardown OK")
@@ -3217,10 +3924,12 @@ MStatus MaroSetControlModeCommand::undoIt() {
 - [ ] **Step 6: 테스트가 통과하는지 확인**
 
 ```bash
-cmake --build out/build && MARO_PLUGIN_PATH="$(cygpath -w "$(find out/build -name maro.mll | head -1)")" MARO_PEER_PATH="$(cygpath -w "$(find out/build -name maro_test_peer.exe | head -1)")" "/c/Program Files/Autodesk/Maya2026/bin/mayapy.exe" tests/maya/test_contract.py
+cmake --build out/build && MARO_PLUGIN_PATH="$(cygpath -w "$(find out/build -name maro.mll | head -1)")" MARO_PEER_PATH="$(cygpath -w "$(find out/build -name maro_test_peer.exe | head -1)")" timeout 300 "/c/Program Files/Autodesk/Maya2026/bin/mayapy.exe" tests/maya/test_contract.py; echo "exit=$?"
 ```
 
-기대: `manual ignores command OK`, `mode switch OK`, `teardown OK`.
+기대: `manual ignores command OK`, `ros mode applies command OK`, `limit clamps ros value OK`, `teardown OK`, `exit=0`.
+
+`no command was applied after switching to ROS mode`로 실패하면 명령이 아예 도착하지 않은 것이므로, Manual 검증도 무의미했다는 뜻이다. 구독 토픽 이름(`joint_commands`)과 로봇 네임스페이스를 먼저 확인한다.
 
 - [ ] **Step 7: 커밋**
 
@@ -3265,20 +3974,26 @@ plugin = os.environ["MARO_PLUGIN_PATH"]
 cmds.loadPlugin(plugin)
 cmds.file(new=True, force=True)
 
-# 1) 순환 연결 시도 -> 거부되거나 최소한 크래시하지 않는다.
+# 1) 순환 연결은 반드시 거부되어야 한다 (스펙 §9 원칙 2).
 a = cmds.createNode("maroAxis", name="axC1")
 b = cmds.createNode("maroAxis", name="axC2")
-cmds.connectAttr(a + ".message", b + ".parentAxis")
-try:
-    cmds.connectAttr(b + ".message", a + ".parentAxis")
-    print("cycle connection was allowed by Maya; evaluation must not hang")
-except RuntimeError:
-    print("cycle rejected OK")
+c = cmds.createNode("maroAxis", name="axC3")
 
-# 평가해도 멈추지 않아야 한다.
+cmds.maroConnectAxis(b, a)      # b 의 부모 = a
+cmds.maroConnectAxis(c, b)      # c 의 부모 = b
+
+try:
+    cmds.maroConnectAxis(a, c)  # a 의 부모 = c -> 3단계 순환
+    raise AssertionError("multi-hop cycle must be rejected at wiring time")
+except RuntimeError:
+    print("multi-hop cycle rejected OK")
+
+# 커맨드를 거치지 않고 직접 이어 순환을 만든 경우에도 평가가 멈추면 안 된다.
+cmds.connectAttr(c + ".message", a + ".parentAxis", force=True)
 cmds.getAttr(a + ".outValue")
 cmds.getAttr(b + ".outValue")
-print("cycle evaluation survived OK")
+cmds.getAttr(c + ".outValue")
+print("raw cycle evaluation survived OK")
 
 # 2) NaN 주입 -> 축이 유한값을 유지한다.
 cube = cmds.polyCube(name="segR")[0]
@@ -3334,14 +4049,27 @@ MARO_PLUGIN_PATH="$(cygpath -w "$(find out/build -name maro.mll | head -1)")" ti
 if(MARO_BUILD_PLUGIN)
     set(MAYAPY "C:/Program Files/Autodesk/Maya2026/bin/mayapy.exe")
 
+    # 플러그인만 있으면 되는 테스트
     foreach(maya_test load axis_node binding capability_stack delete_rules
-                      runtime_lifecycle robustness)
+                      bridge_pump robustness)
         add_test(NAME maya_${maya_test}
                  COMMAND "${MAYAPY}"
                          "${CMAKE_CURRENT_SOURCE_DIR}/maya/test_${maya_test}.py")
         set_tests_properties(maya_${maya_test} PROPERTIES
             ENVIRONMENT "MARO_PLUGIN_PATH=$<TARGET_FILE:maro>"
-            TIMEOUT 180)
+            TIMEOUT 240)
+    endforeach()
+
+    # ROS 2 상대역이 필요한 테스트는 피어 경로도 받는다.
+    foreach(maya_test publish contract)
+        add_test(NAME maya_${maya_test}
+                 COMMAND "${MAYAPY}"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/maya/test_${maya_test}.py")
+        set_tests_properties(maya_${maya_test} PROPERTIES
+            ENVIRONMENT "MARO_PLUGIN_PATH=$<TARGET_FILE:maro>;MARO_PEER_PATH=$<TARGET_FILE:maro_test_peer>"
+            TIMEOUT 360)
+        # 같은 DDS 도메인을 쓰므로 병렬 실행 시 서로 간섭한다.
+        set_tests_properties(maya_${maya_test} PROPERTIES RUN_SERIAL TRUE)
     endforeach()
 endif()
 ```
@@ -3375,6 +4103,7 @@ git commit -m "test: pin crash-inducing scenarios so robustness cannot regress"
 | §4 스택 합성 규칙 | Task 8 |
 | §5 좌표 변환 라이브러리 | Task 2, 3, 4 |
 | §6 스레딩과 큐 | Task 10 |
+| §6 메인 스레드 펌프 (DG ↔ 큐) | Task 10 |
 | §6 생명주기 | Task 5, 10 |
 | §7 토픽 계약 | Task 11, 12 |
 | §7.1 축 보정 | Task 4 (변환), Task 6 (어트리뷰트) |
@@ -3391,6 +4120,18 @@ git commit -m "test: pin crash-inducing scenarios so robustness cannot regress"
 - `maroRobot` 노드는 이 플랜에서 만들지 않는다. Task 10~12는 런타임이 로봇 이름을 직접 받는 형태로 동작한다. `maroRobot`(멤버십 `axes[]`, `publishRate`, QoS, 일괄 모드 전환 커맨드)은 축 파이프라인이 검증된 뒤 후속 플랜에서 추가한다. 지금 넣으면 아직 검증되지 않은 축·발행 경로 위에 그룹핑 계층을 얹는 셈이라 실패 지점이 늘어난다.
 - `maroAxis`의 뷰포트 기즈모 렌더링(`MPxDrawOverride`)과 마니퓰레이터는 시각적 편의이며 계약 검증에 필요하지 않아 S3와 함께 진행한다. Task 6은 로케이터 노드 등록까지만 한다.
 - §10 3단계 시각 확인(RViz2)은 별도 머신·WSL2가 필요한 수동 절차이므로 태스크로 넣지 않는다.
+
+**실행 전 스캔에서 메운 구멍 3개**
+
+초안은 Phase 3를 "부품"(큐, 발행, 수신) 단위로 썼고 그것들을 **구동하는 주체를 넣지 않았다.** 결과적으로 세 가지가 빠져 있었다.
+
+1. **메인 스레드 펌프 부재** — 스펙 §6의 핵심 루프(`MTimerMessage`로 DG↔큐 왕복)가 어느 태스크에도 없었다. `drainAndPublish()`가 영원히 빈 큐를 비웠을 것이다.
+2. **런타임 시작 경로 부재** — `MaroRosRuntime::start()`를 만들기만 하고 호출하는 곳이 없었다.
+3. **순환 탐지 부재** — 스펙 §9 원칙 2가 요구하는 축 체인 순환 거부가 구현되지 않았고, 테스트는 거부와 허용을 모두 받아들이게 쓰여 있었다.
+
+**가장 나빴던 점은 테스트가 틀린 이유로 통과했을 것이라는 사실이다.** Task 12의 "Manual 축이 명령을 무시한다"는 런타임이 돌지 않으니 자동으로 참이었다. 초록불을 보고 검증됐다고 착각했을 것이다.
+
+Phase 3를 **펌프 → 발행 → 수신** 의존성 순서로 재구성해 각 태스크가 앞 태스크를 실제로 사용하게 했다. Task 10이 끝나는 시점에 이미 DG→큐→백그라운드 흐름이 `maroBridgeStats`로 관측 가능하므로, 문제가 생기면 그 태스크에서 즉시 드러난다. 명령 도착 여부를 계수기로 먼저 확인한 뒤 무시 여부를 단언하도록 테스트도 고쳤다.
 
 **검토 중 고친 설계 오류**
 
