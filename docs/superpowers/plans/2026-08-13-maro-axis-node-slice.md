@@ -23,6 +23,7 @@
 - **노드 타입 접두사는 `maro`** (`Maro` = **Ma**ya + **Ro**s).
 - **C++17.** Maya 2026 devkit의 `devkit.cmake`가 플러그인 타깃에 `CMAKE_CXX_STANDARD 17` + `REQUIRED ON`을 강제한다. Maya의 헤더와 ABI가 그걸 전제하므로 우리 쪽에서 올릴 수 없다. `maro_transform`도 플러그인에 링크되므로 같은 표준을 쓴다(C++20 기능을 쓰는 곳도 없다).
 - 경로 상수: devkit `C:/Users/ckd30/Projects/devkitBase`, ROS 2 `C:/dev/ros2_jazzy/install`, vcpkg `C:/src/vcpkg`.
+- **Maya 테스트 주의**: Maya는 **커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.** 노드를 만든 테스트는 `cmds.unloadPlugin` 앞에 `cmds.file(new=True, force=True)`로 씬을 비워야 한다. 빠뜨리면 정리 단계에서 `RuntimeError`가 나는데, 원인이 플러그인 결함처럼 보여 오진하기 쉽다.
 - **빌드 환경 주의**: 이 머신에서 `Launch-VsDevShell.ps1`은 `vswhere.exe`를 못 찾아 `INCLUDE`/`LIB`를 비운 채 조용히 성공한다. 결과는 `basetsd.h`를 못 찾는 엉뚱한 컴파일 에러다. 대신 `VsDevCmd.bat`의 환경을 가져와 쓰고, PowerShell 도구 호출 간에는 환경이 유지되지 않으므로 **빌드와 같은 호출 안에서** 설정한다.
 
 ```powershell
@@ -881,6 +882,8 @@ cmds.loadPlugin(plugin)
 assert cmds.pluginInfo(plugin, query=True, loaded=True), "plugin did not load"
 print("load OK")
 
+# Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
+cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 print("unload OK")
 
@@ -980,6 +983,8 @@ assert cmds.getAttr(axis + ".enabled") is True
 assert cmds.getAttr(axis + ".controlMode") == 0, "default controlMode must be Manual"
 print("defaults OK")
 
+# Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
+cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 maya.standalone.uninitialize()
 print("teardown OK")
@@ -1375,6 +1380,8 @@ try:
 except RuntimeError:
     print("self-parent rejected OK")
 
+# Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
+cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 maya.standalone.uninitialize()
 print("teardown OK")
@@ -1783,6 +1790,8 @@ cmds.setAttr(axis + ".enabled", False)
 assert abs(cmds.getAttr(axis + ".outValue")) < 1e-9, "disabled axis must output zero"
 print("disabled OK")
 
+# Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
+cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 maya.standalone.uninitialize()
 print("teardown OK")
@@ -2358,6 +2367,8 @@ members = cmds.sets("maroOrphanSet", query=True) or []
 assert rot in members, f"orphan not registered in set: {members}"
 print("orphan OK")
 
+# Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
+cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 maya.standalone.uninitialize()
 print("teardown OK")
@@ -3358,6 +3369,8 @@ print("stop halts the pump OK")
 
 # 브리지를 켠 채로 언로드해도 좀비 스레드가 남지 않아야 한다.
 cmds.maroStartBridge("maro")
+# 노드 인스턴스가 남아 있으면 Maya가 언로드를 거부한다. 브리지는 켠 채로 둔다.
+cmds.file(new=True, force=True)
 cmds.unloadPlugin(name)
 print("unload while running OK")
 
@@ -3710,6 +3723,8 @@ assert "0.75" in out, f"joint value not published as expected:\n{out}"
 print("publish round trip OK")
 
 cmds.maroStopBridge()
+# Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
+cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 maya.standalone.uninitialize()
 print("teardown OK")
@@ -3838,6 +3853,8 @@ assert abs(cmds.getAttr(axis + ".outValue") - 0.5) < 1e-6, \
 print("limit clamps ros value OK")
 
 cmds.maroStopBridge()
+# Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
+cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 maya.standalone.uninitialize()
 print("teardown OK")
@@ -4110,6 +4127,8 @@ bare = cmds.createNode("maroAxis", name="axBare")
 assert abs(cmds.getAttr(bare + ".outValue")) < 1e-9
 print("empty stack OK")
 
+# Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
+cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
 maya.standalone.uninitialize()
 print("all robustness scenarios survived")
