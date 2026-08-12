@@ -43,6 +43,8 @@ TEST(Position, ScaleConvertsCentimetresToMetres) {
     const maro::Vec3 ros = maro::mayaToRosPosition(maya, cm);
 
     EXPECT_NEAR(ros.x, 1.0, kEps);
+    EXPECT_NEAR(ros.y, 0.0, kEps);
+    EXPECT_NEAR(ros.z, 0.0, kEps);
 }
 
 TEST(Position, RoundTripIsIdentity) {
@@ -55,4 +57,30 @@ TEST(Position, RoundTripIsIdentity) {
     EXPECT_NEAR(back.x, original.x, 1e-9);
     EXPECT_NEAR(back.y, original.y, 1e-9);
     EXPECT_NEAR(back.z, original.z, 1e-9);
+}
+
+TEST(Position, MayaForwardFlipsSignIntoRosY) {
+    // Maya +Z must land on ROS -Y. This is the case that distinguishes a
+    // proper rotation from a reflection; earlier tests all used z == 0,
+    // where -0 and 0 are indistinguishable.
+    const maro::SceneUnit unit{1.0};
+    const maro::Vec3 maya{0.0, 0.0, 1.0};
+
+    const maro::Vec3 ros = maro::mayaToRosPosition(maya, unit);
+
+    EXPECT_NEAR(ros.x, 0.0, kEps);
+    EXPECT_NEAR(ros.y, -1.0, kEps);
+    EXPECT_NEAR(ros.z, 0.0, kEps);
+}
+
+TEST(Position, RosLeftFlipsSignIntoMayaZ) {
+    // The inverse direction, likewise checked on the axis that changes sign.
+    const maro::SceneUnit unit{1.0};
+    const maro::Vec3 ros{0.0, 1.0, 0.0};
+
+    const maro::Vec3 maya = maro::rosToMayaPosition(ros, unit);
+
+    EXPECT_NEAR(maya.x, 0.0, kEps);
+    EXPECT_NEAR(maya.y, 0.0, kEps);
+    EXPECT_NEAR(maya.z, -1.0, kEps);
 }
