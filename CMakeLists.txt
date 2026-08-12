@@ -8,6 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 주석이 깨진다. 소스와 실행 문자셋을 모두 UTF-8로 고정한다.
 if(MSVC)
     add_compile_options(/utf-8)
+
+    # 이 프로젝트는 모든 Maya/ROS 2 콜백 경계에서 예외를 잡아 막는 것을
+    # 전제로 한다. 해제(unwind) 시맨틱이 꺼져 있으면 스택 되감기 중 소멸자가
+    # 실행되지 않아 그 방어가 무의미해진다.
+    add_compile_options(/EHsc)
 endif()
 
 # 외부 위치. 캐시 변수로 주입해 하드코딩을 피한다.
