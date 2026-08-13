@@ -39,4 +39,32 @@ private:
     MDGModifier m_modifier;
 };
 
+// 브리지 제어. 사용자가 Maya 안에서 ROS 2 연동을 켜고 끄는 유일한 경로다.
+// 시작 시 MaroCommandDeviceNode를 만들어 live로 세우고, 정지 시 지워
+// Maya가 그 스레드를 정리하게 한다. MDGModifier를 쓰지만 스레드/네트워크
+// 부작용은 되돌릴 수 없으므로 이 커맨드 자체는 undo 대상이 아니다.
+class MaroStartBridgeCommand : public MPxCommand {
+public:
+    static void* creator();
+    static MSyntax newSyntax();
+    MStatus doIt(const MArgList& args) override;
+};
+
+class MaroStopBridgeCommand : public MPxCommand {
+public:
+    static void* creator();
+    MStatus doIt(const MArgList& args) override;
+};
+
+// 펌프와 두 백그라운드 스레드(발행 쪽 MaroRosRuntime, 수신 쪽
+// MaroCommandDeviceNode)가 실제로 일하고 있는지 보는 진단 커맨드.
+class MaroBridgeStatsCommand : public MPxCommand {
+public:
+    static void* creator();
+    MStatus doIt(const MArgList& args) override;
+};
+
+// 플러그인 언로드 시 브리지를 확실히 내린다.
+void shutdownBridge();
+
 }  // namespace maro

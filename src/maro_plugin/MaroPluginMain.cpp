@@ -4,6 +4,7 @@
 
 #include "MaroAxisNode.h"
 #include "MaroCapabilityNodes.h"
+#include "MaroCommandDeviceNode.h"
 #include "MaroCommands.h"
 #include "MaroDeleteWatcher.h"
 
@@ -71,6 +72,39 @@ MStatus initializePlugin(MObject obj) {
         return status;
     }
 
+    status = plugin.registerNode(
+        "maroCommandDevice",
+        maro::MaroCommandDeviceNode::id,
+        maro::MaroCommandDeviceNode::creator,
+        maro::MaroCommandDeviceNode::initialize,
+        MPxNode::kThreadedDeviceNode);
+    if (!status) {
+        status.perror("Maro: failed to register maroCommandDevice");
+        return status;
+    }
+
+    status = plugin.registerCommand("maroStartBridge",
+                                    maro::MaroStartBridgeCommand::creator,
+                                    maro::MaroStartBridgeCommand::newSyntax);
+    if (!status) {
+        status.perror("Maro: failed to register maroStartBridge");
+        return status;
+    }
+
+    status = plugin.registerCommand("maroStopBridge",
+                                    maro::MaroStopBridgeCommand::creator);
+    if (!status) {
+        status.perror("Maro: failed to register maroStopBridge");
+        return status;
+    }
+
+    status = plugin.registerCommand("maroBridgeStats",
+                                    maro::MaroBridgeStatsCommand::creator);
+    if (!status) {
+        status.perror("Maro: failed to register maroBridgeStats");
+        return status;
+    }
+
     status = maro::MaroDeleteWatcher::install();
     if (!status) {
         status.perror("Maro: failed to install delete watcher");
@@ -84,11 +118,16 @@ MStatus initializePlugin(MObject obj) {
 MStatus uninitializePlugin(MObject obj) {
     MFnPlugin plugin(obj);
 
+    maro::shutdownBridge();
     maro::MaroDeleteWatcher::uninstall();
 
+    plugin.deregisterCommand("maroBridgeStats");
+    plugin.deregisterCommand("maroStopBridge");
+    plugin.deregisterCommand("maroStartBridge");
     plugin.deregisterCommand("maroConnectAxis");
     plugin.deregisterCommand("maroBindAxis");
 
+    plugin.deregisterNode(maro::MaroCommandDeviceNode::id);
     plugin.deregisterNode(maro::MaroSensorRangeNode::id);
     plugin.deregisterNode(maro::MaroSensorDirectionNode::id);
     plugin.deregisterNode(maro::MaroLimitNode::id);
