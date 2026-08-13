@@ -4,3 +4,5 @@ build_test/
 install/
 log/
 CMakeLists.txt.bak
+.superpowers/
+out/
