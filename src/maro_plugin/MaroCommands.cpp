@@ -296,6 +296,12 @@ MStatus MaroConnectAxisCommand::undoIt() {
 namespace {
 std::unique_ptr<MaroRosRuntime> g_runtime;
 MObjectHandle g_commandDeviceHandle;
+
+// shutdownBridge()의 타임아웃 경로가 g_runtime을 release()해 넘겨 두는
+// 자리. 절대 delete하지 않는다 -- 의도적 누수(아래 shutdownBridge() 주석
+// 참고)이며, 이 포인터를 남겨 두는 이유는 오직 디버거/코드 리뷰에서 "이건
+// 실수로 버려진 게 아니라 일부러 버려진 것"이라는 흔적을 남기기 위해서다.
+MaroRosRuntime* g_abandonedRuntime = nullptr;
 }  // namespace
 
 void shutdownBridge() {
@@ -330,11 +336,32 @@ void shutdownBridge() {
         // (-> rclcpp::shutdown(), MaroRosRuntime.cpp 참고)을 부르면, 그
         // 스레드가 여전히 참조 중인 전역 rclcpp 컨텍스트를 발밑에서
         // 뽑아버리는 것이다 -- 크래시하거나 프로세스가 끝나지 않는다.
-        // g_runtime을 reset()하지 않고 의도적으로 누수해 컨텍스트를
-        // 살려 둔다: 컨텍스트 누수는 살아남지만(메모리/핸들만 낭비),
-        // 살아있는 스레드 밑에서 컨텍스트를 뽑는 건 살아남지 못한다.
         // 이미 위에서 비정상 상태임을 사용자에게 알렸다 -- 여기서 더
-        // 할 수 있는 안전한 정리는 없다. 프로세스 종료 시 OS가 정리한다.
+        // 할 수 있는 안전한 정리는 없다.
+        //
+        // 재검토(Gap 1): g_runtime.reset()을 "안 부르는" 것만으로는 누수가
+        // 되지 않는다. g_runtime은 std::unique_ptr이라 언젠가는 소멸자가
+        // 돈다 -- 그리고 여기서 return하고 나면, 이 함수를 부른
+        // uninitializePlugin()도 곧 return하고, Maya는 maro.mll에
+        // FreeLibrary()를 부른다. DLL_PROCESS_DETACH가 이 번역 단위의
+        // 네임스페이스 정적 변수(g_runtime)를 소멸시키는데, 그 소멸자가
+        // ~MaroRosRuntime() -> stop() -> rclcpp::shutdown()을 부른다
+        // (MaroRosRuntime.cpp 참고) -- 우리가 여기서 피하려던 바로 그
+        // 호출이, 같은 언로드 시퀀스 안에서 몇 순간 뒤로 미뤄질 뿐이다.
+        // 그러니 이건 진짜 누수가 아니라 "return으로 위장한 지연"이었다.
+        //
+        // 진짜로 버리려면 소유권 자체를 버려야 한다: release()는
+        // unique_ptr에게서 포인터를 빼앗아 반환하고, unique_ptr 자신은
+        // nullptr이 되어 스코프를 벗어나도 아무것도 delete하지 않는다.
+        // 그 원시 포인터를 g_abandonedRuntime에 담아 두고 다시는 delete하지
+        // 않는다 -- 그러면 ~MaroRosRuntime()이 이 인스턴스에 대해서는
+        // 다시는(DLL 언로드 시점을 포함해) 불리지 않고, 안에 들어있던
+        // std::thread(아직 조인 안 됨)도 소멸자를 맞지 않아 std::terminate
+        // 위험도 없다. 컨텍스트 누수는 살아남지만(메모리/핸들만 낭비),
+        // 살아있는 스레드 밑에서 컨텍스트를 뽑는 건 살아남지 못한다 -- 이게
+        // 그 둘 중 덜 나쁜 쪽을 실제로 선택하는 코드다. 프로세스 종료 시
+        // OS가 나머지를 정리한다.
+        g_abandonedRuntime = g_runtime.release();
         return;
     }
 
@@ -450,9 +477,25 @@ MStatus MaroStartBridgeCommand::doIt(const MArgList& args) {
                 "Maro: could not undo command device node creation; a "
                 "stray node may remain and block plugin unload.");
         }
-        MaroPump::stop();
-        g_runtime->stop();
-        g_runtime.reset();
+
+        // Gap 2 (재검토): 위 undoIt()가 DG에서 노드를 지워도, 463행 근처
+        // 주석이 이미 짚었듯 threadHandler()는 노드 "생성" 시점에 이미
+        // 시작됐을 수 있다 -- live나 C++ 인스턴스 획득 여부와 무관하게.
+        // deleteNode() 계열 호출이 그 스레드의 종료를 동기적으로 보장한다는
+        // 근거가 devkit 문서에 없다는 사실도 shutdownBridge() 맨 위 설계
+        // 노트와 똑같이 적용된다. 그러므로 여기서 (예전 코드처럼)
+        // g_runtime->stop()을 직접 부르면, shutdownBridge()가 존재하는
+        // 이유였던 바로 그 경합 -- 살아있는 스레드 밑에서
+        // rclcpp::shutdown() -- 을 다른 호출부에서 그대로 재현하게 된다.
+        // shutdownBridge()를 부르는 게 안전한 이유: g_commandDeviceHandle은
+        // 이 지점에서 아직 세팅되지 않았으므로(무효 핸들, 464행 근처에서야
+        // 세팅된다) shutdownBridge()의 "핸들로 노드 지우기" 단계는 아무 일도
+        // 안 한다 (이미 위 undoIt()로 지웠다) -- 중복 삭제가 아니다. g_runtime은
+        // 이 지점에서 항상 non-null이다 (바로 위에서 make_unique와 start()가
+        // 성공했다). 그 뒤로는 shutdownBridge()의 폴링 + 가드된 g_runtime
+        // 정리(정상 정지 또는 진짜 누수)만 남는데, 그게 정확히 우리가 여기서
+        // 원하는 동작이다. 로직을 복제하는 대신 재사용한다.
+        shutdownBridge();
         MGlobal::displayError("Maro: command device node has no C++ instance.");
         return MS::kFailure;
     }
