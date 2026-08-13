@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include <maya/MAngle.h>
 #include <maya/MArrayDataHandle.h>
 #include <maya/MDataBlock.h>
 #include <maya/MDataHandle.h>
@@ -12,6 +13,7 @@
 #include <maya/MFnMessageAttribute.h>
 #include <maya/MFnNumericAttribute.h>
 #include <maya/MFnTypedAttribute.h>
+#include <maya/MFnUnitAttribute.h>
 #include <maya/MGlobal.h>
 #include <maya/MMatrix.h>
 #include <maya/MPlug.h>
@@ -47,6 +49,7 @@ MStatus MaroAxisNode::initialize() {
     MFnTypedAttribute typFn;
     MFnEnumAttribute enumFn;
     MFnMatrixAttribute matFn;
+    MFnUnitAttribute angFn;
 
     // 바인딩은 이름 문자열이 아니라 message 연결로 맺는다.
     // Maya가 rename/delete/undo를 자동 추적하므로 동기화가 깨지지 않는다.
@@ -115,9 +118,14 @@ MStatus MaroAxisNode::initialize() {
     numFn.setKeyable(true);
     addAttribute(aEnabled);
 
-    aOutValue = numFn.create("outValue", "otv", MFnNumericData::kDouble, 0.0);
-    numFn.setStorable(false);
-    numFn.setWritable(false);
+    // 네이티브 rotateX류 어트리뷰트로 바로 연결될 수 있는 값이므로 실제
+    // 각도 단위로 선언한다. 평범한 double로 두면 그 연결에서 Maya가
+    // 라디안 값을 UI 단위(도)로 오인해 잘못된 unitConversion 배율을
+    // 끼워 넣는다 (실측: plainVal(1.0 rad 의도) -> rotateX 연결 시
+    // conversionFactor 0.0174533로 1도로 둔갑).
+    aOutValue = angFn.create("outValue", "otv", MFnUnitAttribute::kAngle, 0.0);
+    angFn.setStorable(false);
+    angFn.setWritable(false);
     addAttribute(aOutValue);
 
     aOutTransform = matFn.create("outTransform", "ott",
@@ -192,8 +200,10 @@ MStatus MaroAxisNode::compute(const MPlug& plug, MDataBlock& data) {
             value = 0.0;
         }
 
+        // aOutValue is MFnUnitAttribute::kAngle now; write via setMAngle so
+        // Maya stores it correctly instead of reinterpreting the raw double.
         MDataHandle outVal = data.outputValue(aOutValue);
-        outVal.setDouble(value);
+        outVal.setMAngle(MAngle(value, MAngle::kRadians));
         outVal.setClean();
 
         MDataHandle outXf = data.outputValue(aOutTransform);

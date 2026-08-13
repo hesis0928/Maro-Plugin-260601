@@ -1,4 +1,5 @@
 """스택 합성: rotation이 값을 만들고 limit들이 순차적으로 클램프한다."""
+import math
 import os
 import sys
 
@@ -11,6 +12,20 @@ import maya.cmds as cmds  # noqa: E402
 plugin = os.environ["MARO_PLUGIN_PATH"]
 cmds.loadPlugin(plugin)
 cmds.file(new=True, force=True)
+
+# maroRotation.angle, maroLimit's min/max, and maroAxis.outValue are all
+# MFnUnitAttribute::kAngle now, so cmds.setAttr/getAttr read and write them
+# in Maya's *current UI angle unit* (degrees by default), not raw radians.
+# Every literal below was written in radians (matching the compute()
+# internals and the pre-conversion plain-double behavior), so pin the
+# session's working angle unit to radians once, up front, instead of
+# converting at every call site. cmds.currentUnit() is the only per-call
+# unit-control surface cmds exposes for angle attributes in this Maya
+# version -- setAttr's `type="doubleAngle"` is rejected outright ("not the
+# name of a recognized type"). The unit contract test near the end of this
+# file flips currentUnit to degrees deliberately, to prove the UI-facing
+# conversion itself; everywhere else here stays in radians.
+cmds.currentUnit(angle="rad")
 
 axis = cmds.createNode("maroAxis", name="axis1")
 rot = cmds.createNode("maroRotation", name="rot1")
@@ -108,6 +123,24 @@ print("sensor nodes OK")
 cmds.setAttr(axis + ".enabled", False)
 assert abs(cmds.getAttr(axis + ".outValue")) < 1e-9, "disabled axis must output zero"
 print("disabled OK")
+
+# 단위 계약: MFnUnitAttribute는 데이터블록(항상 라디안)과 cmds/Attribute
+# Editor 표면(현재 UI 각도 단위, 기본 도) 사이를 변환한다. 그 변환이 실제로
+# 걸려 있는지 끝까지 증명한다 -- rotation을 180 "도"로 설정하고 axis의
+# outValue를 "라디안"으로 읽어 pi가 나오는지 확인한다. cmds.currentUnit()로
+# 각 cmds.setAttr/getAttr 호출이 어느 단위로 말하는지 명시적으로 통제한다.
+axisUnit = cmds.createNode("maroAxis", name="axisUnitContract")
+rotUnit = cmds.createNode("maroRotation", name="rotUnitContract")
+cmds.connectAttr(rotUnit + ".capabilityOut", axisUnit + ".capabilityIn[0]")
+
+cmds.currentUnit(angle="deg")
+cmds.setAttr(rotUnit + ".angle", 180.0)
+
+cmds.currentUnit(angle="rad")
+outRad = cmds.getAttr(axisUnit + ".outValue")
+assert abs(outRad - math.pi) < 1e-9, \
+    f"180 degrees in must read back as pi radians out (got {outRad})"
+print("unit contract (180 deg in -> pi rad out) OK")
 
 # Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
 cmds.file(new=True, force=True)

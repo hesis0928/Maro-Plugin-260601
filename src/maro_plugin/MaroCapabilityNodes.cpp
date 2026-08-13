@@ -1,15 +1,26 @@
 #include "MaroCapabilityNodes.h"
 
+#include <maya/MAngle.h>
 #include <maya/MDataBlock.h>
 #include <maya/MDataHandle.h>
 #include <maya/MFnCompoundAttribute.h>
 #include <maya/MFnNumericAttribute.h>
+#include <maya/MFnUnitAttribute.h>
 #include <maya/MGlobal.h>
 #include <maya/MPlug.h>
 
 namespace maro {
 
 MStatus createCapabilityOut(CapabilityOutAttrs& attrs) {
+    // capValue/capMin/capMax carry radians here on purpose, as plain doubles
+    // rather than MFnUnitAttribute::kAngle. This compound is an internal
+    // transport between our own nodes (maroRotation/maroLimit -> maroAxis);
+    // it is marked non-storable/non-writable and never shown in the
+    // Attribute Editor, so there is no UI-unit ambiguity to resolve. Making
+    // it a unit type would also require child access through MFnUnitAttribute
+    // on every read/write for no user-visible benefit. The angle/limit
+    // attributes that a user actually types into keep real units; this
+    // compound does not.
     MFnNumericAttribute numFn;
     MFnCompoundAttribute cmpFn;
 
@@ -38,11 +49,14 @@ CapabilityOutAttrs MaroRotationNode::out;
 void* MaroRotationNode::creator() { return new MaroRotationNode(); }
 
 MStatus MaroRotationNode::initialize() {
-    MFnNumericAttribute numFn;
+    MFnUnitAttribute angFn;
 
-    aAngle = numFn.create("angle", "ang", MFnNumericData::kDouble, 0.0);
-    numFn.setStorable(true);
-    numFn.setKeyable(true);
+    // Real angular unit: the Attribute Editor now shows/accepts degrees
+    // (Maya's default UI angle unit) while the data block still stores
+    // radians internally, same as any native rotate* attribute.
+    aAngle = angFn.create("angle", "ang", MFnUnitAttribute::kAngle, 0.0);
+    angFn.setStorable(true);
+    angFn.setKeyable(true);
     addAttribute(aAngle);
 
     createCapabilityOut(out);
@@ -60,7 +74,10 @@ MStatus MaroRotationNode::compute(const MPlug& plug, MDataBlock& data) {
 
         MDataHandle handle = data.outputValue(out.compound);
         handle.child(out.type).setShort(0);   // 0 = rotation
-        handle.child(out.value).setDouble(data.inputValue(aAngle).asDouble());
+        // .asAngle().asRadians() is explicit about the unit; the compound
+        // child it feeds (capValue) is a plain double carrying radians.
+        handle.child(out.value).setDouble(
+            data.inputValue(aAngle).asAngle().asRadians());
         data.setClean(plug);
         return MS::kSuccess;
     } catch (...) {
@@ -92,9 +109,12 @@ MObject makeBool(MFnNumericAttribute& fn, const char* longName,
     return attr;
 }
 
-MObject makeDouble(MFnNumericAttribute& fn, const char* longName,
-                   const char* shortName, double value) {
-    MObject attr = fn.create(longName, shortName, MFnNumericData::kDouble, value);
+// Angle unit attributes. The default is expressed via MAngle so the
+// intent ("+/-180 degrees") reads directly in code instead of as a
+// repeated-digit radian literal.
+MObject makeAngle(MFnUnitAttribute& fn, const char* longName,
+                  const char* shortName, const MAngle& value) {
+    MObject attr = fn.create(longName, shortName, value);
     fn.setStorable(true);
     fn.setKeyable(true);
     return attr;
@@ -103,6 +123,7 @@ MObject makeDouble(MFnNumericAttribute& fn, const char* longName,
 
 MStatus MaroLimitNode::initialize() {
     MFnNumericAttribute numFn;
+    MFnUnitAttribute angFn;
 
     aEnableX = makeBool(numFn, "enableX", "enx");
     addAttribute(aEnableX);
@@ -111,17 +132,17 @@ MStatus MaroLimitNode::initialize() {
     aEnableZ = makeBool(numFn, "enableZ", "enz");
     addAttribute(aEnableZ);
 
-    aMinX = makeDouble(numFn, "minX", "mnx", -3.14159265358979);
+    aMinX = makeAngle(angFn, "minX", "mnx", MAngle(-180.0, MAngle::kDegrees));
     addAttribute(aMinX);
-    aMaxX = makeDouble(numFn, "maxX", "mxx", 3.14159265358979);
+    aMaxX = makeAngle(angFn, "maxX", "mxx", MAngle(180.0, MAngle::kDegrees));
     addAttribute(aMaxX);
-    aMinY = makeDouble(numFn, "minY", "mny", -3.14159265358979);
+    aMinY = makeAngle(angFn, "minY", "mny", MAngle(-180.0, MAngle::kDegrees));
     addAttribute(aMinY);
-    aMaxY = makeDouble(numFn, "maxY", "mxy", 3.14159265358979);
+    aMaxY = makeAngle(angFn, "maxY", "mxy", MAngle(180.0, MAngle::kDegrees));
     addAttribute(aMaxY);
-    aMinZ = makeDouble(numFn, "minZ", "mnz", -3.14159265358979);
+    aMinZ = makeAngle(angFn, "minZ", "mnz", MAngle(-180.0, MAngle::kDegrees));
     addAttribute(aMinZ);
-    aMaxZ = makeDouble(numFn, "maxZ", "mxz", 3.14159265358979);
+    aMaxZ = makeAngle(angFn, "maxZ", "mxz", MAngle(180.0, MAngle::kDegrees));
     addAttribute(aMaxZ);
 
     createCapabilityOut(out);
@@ -148,12 +169,17 @@ MStatus MaroLimitNode::compute(const MPlug& plug, MDataBlock& data) {
             static_cast<short>(data.inputValue(aEnableY).asBool()),
             static_cast<short>(data.inputValue(aEnableZ).asBool()));
 
-        handle.child(out.minimum).set3Double(data.inputValue(aMinX).asDouble(),
-                                             data.inputValue(aMinY).asDouble(),
-                                             data.inputValue(aMinZ).asDouble());
-        handle.child(out.maximum).set3Double(data.inputValue(aMaxX).asDouble(),
-                                             data.inputValue(aMaxY).asDouble(),
-                                             data.inputValue(aMaxZ).asDouble());
+        // .asAngle().asRadians() is explicit about the unit; the compound
+        // children they feed (capMin/capMax) are plain doubles carrying
+        // radians.
+        handle.child(out.minimum).set3Double(
+            data.inputValue(aMinX).asAngle().asRadians(),
+            data.inputValue(aMinY).asAngle().asRadians(),
+            data.inputValue(aMinZ).asAngle().asRadians());
+        handle.child(out.maximum).set3Double(
+            data.inputValue(aMaxX).asAngle().asRadians(),
+            data.inputValue(aMaxY).asAngle().asRadians(),
+            data.inputValue(aMaxZ).asAngle().asRadians());
 
         data.setClean(plug);
         return MS::kSuccess;
