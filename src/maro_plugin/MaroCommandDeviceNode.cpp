@@ -46,12 +46,49 @@ MObject MaroCommandDeviceNode::aCommandOut;
 std::atomic<std::uint64_t> MaroCommandDeviceNode::s_applied{0};
 std::atomic<std::uint64_t> MaroCommandDeviceNode::s_ticks{0};
 std::atomic<std::uint64_t> MaroCommandDeviceNode::s_dropped{0};
-std::atomic<bool> MaroCommandDeviceNode::s_threadAlive{false};
+std::atomic<std::uint64_t> MaroCommandDeviceNode::s_poolExhausted{0};
+std::atomic<int> MaroCommandDeviceNode::s_threadAliveCount{0};
+std::uint64_t MaroCommandDeviceNode::s_lastReportedDropped{0};
+std::uint64_t MaroCommandDeviceNode::s_lastReportedPoolExhausted{0};
+
+namespace {
+
+// RAII: s_threadAliveCount를 늘리고, 이 가드가 스코프를 벗어나면 -- 정상
+// 종료든, isDone()/endThreadLoop()가 try 밖에서 예외를 던져 스택이
+// 되감기든 -- 반드시 다시 내린다. 예전에는 루프 맨 끝에서
+// s_threadAlive.store(false)를 직접 불렀는데, 그 줄 앞에서 예외가 새면
+// 카운터가 영원히 "살아있음"에 걸려 shutdownBridge()가 매번 2초를 날리고
+// 이미 죽은 스레드에 대해 경고를 찍게 된다.
+class ThreadAliveGuard {
+public:
+    explicit ThreadAliveGuard(std::atomic<int>& counter) : m_counter(counter) {
+        m_counter.fetch_add(1, std::memory_order_relaxed);
+    }
+    ~ThreadAliveGuard() {
+        m_counter.fetch_sub(1, std::memory_order_relaxed);
+    }
+    ThreadAliveGuard(const ThreadAliveGuard&) = delete;
+    ThreadAliveGuard& operator=(const ThreadAliveGuard&) = delete;
+
+private:
+    std::atomic<int>& m_counter;
+};
+
+}  // namespace
 
 MaroCommandDeviceNode::MaroCommandDeviceNode() {}
 
 MaroCommandDeviceNode::~MaroCommandDeviceNode() {
-    destroyMemoryPools();
+    // 소멸자에서 예외가 새면 std::terminate다. 다른 콜백들과 같은 규칙.
+    try {
+        destroyMemoryPools();
+    } catch (const std::exception& e) {
+        MGlobal::displayError(
+            MString("Maro: command device destroyMemoryPools failed: ") + e.what());
+    } catch (...) {
+        MGlobal::displayError(
+            "Maro: command device destroyMemoryPools failed with unknown error.");
+    }
 }
 
 void* MaroCommandDeviceNode::creator() {
@@ -77,14 +114,23 @@ MStatus MaroCommandDeviceNode::initialize() {
 }
 
 void MaroCommandDeviceNode::postConstructor() {
-    MObjectArray attrs;
-    attrs.append(aCommandOut);
-    setRefreshOutputAttributes(attrs);
+    // Maya 콜백이다. 예외가 새면 Maya가 죽는다.
+    try {
+        MObjectArray attrs;
+        attrs.append(aCommandOut);
+        setRefreshOutputAttributes(attrs);
 
-    // 명령 하나 = CommandRecord 하나. 여유 있게 64개 버퍼를 돌린다.
-    const MStatus status = createMemoryPools(kPoolDepth, 1, sizeof(CommandRecord));
-    if (!status) {
-        MGlobal::displayError("Maro: failed to create command device memory pools.");
+        // 명령 하나 = CommandRecord 하나. 여유 있게 64개 버퍼를 돌린다.
+        const MStatus status = createMemoryPools(kPoolDepth, 1, sizeof(CommandRecord));
+        if (!status) {
+            MGlobal::displayError("Maro: failed to create command device memory pools.");
+        }
+    } catch (const std::exception& e) {
+        MGlobal::displayError(
+            MString("Maro: command device postConstructor failed: ") + e.what());
+    } catch (...) {
+        MGlobal::displayError(
+            "Maro: command device postConstructor failed with unknown error.");
     }
 }
 
@@ -102,11 +148,19 @@ void MaroCommandDeviceNode::resetStats() {
     s_applied.store(0);
     s_ticks.store(0);
     s_dropped.store(0);
+    s_poolExhausted.store(0);
+    // compute()의 방울 경고 기준선도 함께 되돌린다 (M9): 안 그러면 재시작
+    // 후 dropped(0) != lastReported(N)에서 unsigned 뺄셈이 언더플로우해
+    // 터무니없는 개수를 찍는다.
+    s_lastReportedDropped = 0;
+    s_lastReportedPoolExhausted = 0;
 }
 
 std::uint64_t MaroCommandDeviceNode::appliedCommandCount() { return s_applied.load(); }
 std::uint64_t MaroCommandDeviceNode::threadTickCount() { return s_ticks.load(); }
-bool MaroCommandDeviceNode::isThreadAlive() { return s_threadAlive.load(); }
+// 개수 > 0 이면 인스턴스 중 최소 하나는 스레드가 살아있다는 뜻이다 -- 여러
+// maroCommandDevice 인스턴스가 있어도 정확하다 (I5/M10).
+bool MaroCommandDeviceNode::isThreadAlive() { return s_threadAliveCount.load() > 0; }
 
 void MaroCommandDeviceNode::applyToMatchingAxis(const std::string& jointName, double value) {
     // compute()에서만 불린다 -- 메인 스레드다. DG를 만지는 유일한 지점이다.
@@ -130,7 +184,11 @@ void MaroCommandDeviceNode::threadHandler() {
     // Maya가 만든 백그라운드 스레드다. 여기서 예외가 새면 스레드가 조용히
     // 죽는다. DG는 절대 건드리지 않는다 -- 버퍼만 채운다.
     setDone(false);
-    s_threadAlive.store(true);
+
+    // ThreadAliveGuard는 이 스코프를 벗어나는 모든 경로(정상 종료 포함,
+    // 아래 while 루프 밖의 isDone()/endThreadLoop()가 예외를 던져 스택이
+    // 되감기는 경로 포함)에서 카운터를 내린다 -- I5/M10.
+    ThreadAliveGuard aliveGuard(s_threadAliveCount);
 
     // setRobotName()은 메인 스레드에서, 이 스레드가 시작되는 것과 비슷한
     // 시점에 불린다 (devkit 문서에 순서 보장이 없다). 값이 채워질 때까지
@@ -145,6 +203,12 @@ void MaroCommandDeviceNode::threadHandler() {
     std::shared_ptr<rclcpp::Node> node;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub;
     std::vector<CommandRecord> pending;
+
+    // M12: rclcpp::spin_some(node) 자유 함수는 호출마다 SingleThreadedExecutor
+    // 하나(가드 컨디션, wait set까지)를 새로 만들고 버린다. 이 루프는
+    // frameRate Hz로 돈다 -- 매 반복 그 생성/파괴 비용을 물 이유가 없다.
+    // executor 하나를 스레드 수명 동안 들고 spin_some()만 반복 호출한다.
+    rclcpp::executors::SingleThreadedExecutor executor;
 
     if (!robotName.empty()) {
         try {
@@ -171,6 +235,7 @@ void MaroCommandDeviceNode::threadHandler() {
                         pending.push_back(rec);
                     }
                 });
+            executor.add_node(node);
         } catch (...) {
             node.reset();
             sub.reset();
@@ -185,7 +250,7 @@ void MaroCommandDeviceNode::threadHandler() {
             beginThreadLoop();
             if (isLive() && node) {
                 pending.clear();
-                rclcpp::spin_some(node);
+                executor.spin_some();
                 s_ticks.fetch_add(1, std::memory_order_relaxed);
 
                 for (const CommandRecord& rec : pending) {
@@ -193,6 +258,15 @@ void MaroCommandDeviceNode::threadHandler() {
                     if (acquireDataStorage(buffer)) {
                         *reinterpret_cast<CommandRecord*>(buffer.ptr()) = rec;
                         pushThreadData(buffer);
+                    } else {
+                        // 조용한 실패 금지 (I4): 풀 64슬롯이 다 찼다.
+                        // compute()가 못 따라잡을 때(정상적인 배압)의 일시적
+                        // 상태일 수도 있고, 배치/헤드리스처럼 compute()가
+                        // 애초에 안 불려 영구적인 상태일 수도 있다. 원인이
+                        // 다르므로 s_dropped(과사이즈 이름)에 합치지 않고
+                        // 별도 카운터로 구분해, "이름을 줄여라"는 엉뚱한
+                        // 처방이 나가지 않게 한다.
+                        s_poolExhausted.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
             }
@@ -202,15 +276,27 @@ void MaroCommandDeviceNode::threadHandler() {
         endThreadLoop();   // frameRate 기준 스로틀. 우리가 sleep_for를 쓰지 않는 이유다.
     }
 
+    if (node) {
+        executor.remove_node(node);
+    }
     sub.reset();
     node.reset();
-    s_threadAlive.store(false);
+    // s_threadAliveCount는 aliveGuard 소멸자가 스코프 종료 시 내린다.
 }
 
 void MaroCommandDeviceNode::threadShutdownHandler() {
     // File -> New, Exit, 또는 이 노드가 삭제될 때 Maya가 호출한다.
-    // threadHandler()의 while(!isDone()) 루프를 깨운다.
-    setDone(true);
+    // threadHandler()의 while(!isDone()) 루프를 깨운다. Maya 콜백이다 --
+    // 예외가 새면 Maya가 죽는다.
+    try {
+        setDone(true);
+    } catch (const std::exception& e) {
+        MGlobal::displayError(
+            MString("Maro: command device threadShutdownHandler failed: ") + e.what());
+    } catch (...) {
+        MGlobal::displayError(
+            "Maro: command device threadShutdownHandler failed with unknown error.");
+    }
 }
 
 MStatus MaroCommandDeviceNode::compute(const MPlug& plug, MDataBlock& data) {
@@ -229,14 +315,28 @@ MStatus MaroCommandDeviceNode::compute(const MPlug& plug, MDataBlock& data) {
         }
 
         // 조용한 실패 금지: 스레드가 버린 게 있으면 상태가 바뀔 때 1회만 경고한다.
-        static std::uint64_t lastReportedDropped = 0;
+        // lastReported 기준선은 class static이라 resetStats()가 함께 0으로
+        // 되돌린다 (M9) -- 함수 로컬 static이면 재시작 후 dropped(0) !=
+        // lastReported(N)에서 unsigned 뺄셈이 언더플로우한다.
         const std::uint64_t dropped = s_dropped.load();
-        if (dropped != lastReportedDropped) {
+        if (dropped != s_lastReportedDropped) {
             MGlobal::displayWarning(
                 MString("Maro: dropped ") +
-                static_cast<int>(dropped - lastReportedDropped) +
+                static_cast<int>(dropped - s_lastReportedDropped) +
                 " oversized joint command name(s) (limit 63 chars).");
-            lastReportedDropped = dropped;
+            s_lastReportedDropped = dropped;
+        }
+
+        // I4: 버퍼 풀(64슬롯)이 꽉 차 스레드가 버린 명령도 같은 방식으로 알린다.
+        const std::uint64_t poolExhausted = s_poolExhausted.load();
+        if (poolExhausted != s_lastReportedPoolExhausted) {
+            MGlobal::displayWarning(
+                MString("Maro: dropped ") +
+                static_cast<int>(poolExhausted - s_lastReportedPoolExhausted) +
+                " inbound command(s): the command buffer pool (64 slots) was "
+                "full. This means compute() is not keeping up (interactive) "
+                "or is not running at all (batch/headless).");
+            s_lastReportedPoolExhausted = poolExhausted;
         }
 
         MDataHandle out = data.outputValue(aCommandOut);

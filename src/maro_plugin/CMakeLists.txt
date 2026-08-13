@@ -68,6 +68,16 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 
 # 런타임 DLL을 플러그인 옆에 둔다. 벤더 DLL은 install/bin이 아니라
 # install/opt/<vendor>/bin에 있으므로 반드시 함께 복사해야 로드된다.
+#
+# I8: 이 스테이징만으로는 부족하다. Maya의 플러그인 로더는 .mll을
+# LoadLibraryEx(LOAD_WITH_ALTERED_SEARCH_PATH)로 열지 않는다 -- 그래서
+# Windows는 .mll이 있는 이 디렉터리를 DLL 검색 경로에 자동으로 넣어주지
+# 않는다. 여기서 옆에 복사해 둔 151개 ROS 2 런타임 DLL이 실제로 로드되려면
+# 이 디렉터리($<TARGET_FILE_DIR:${PROJECT_NAME}>, 예:
+# out/build/src/maro_plugin/<config>)가 Maya(또는 mayapy)를 띄우는
+# 프로세스의 PATH 환경변수에 들어 있어야 한다. 안 넣으면 loadPlugin이
+# "종속 DLL을 찾을 수 없다"류의 오류로 조용히 실패한다 -- CMake만으로는
+# 고칠 수 없는 실행 시점 요구사항이라 여기 남겨 둔다.
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${ROS2_INSTALL}/bin" "$<TARGET_FILE_DIR:${PROJECT_NAME}>"

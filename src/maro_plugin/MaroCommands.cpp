@@ -324,6 +324,18 @@ void shutdownBridge() {
         MGlobal::displayError(
             "Maro: command device thread did not stop within 2s; "
             "ROS 2 shutdown may hang or crash.");
+
+        // C2: 이 시점에 우리는 방금 "스레드가 아직 산다"는 걸 직접
+        // 확인했다. 그런데도 아래로 흘러 g_runtime->stop()
+        // (-> rclcpp::shutdown(), MaroRosRuntime.cpp 참고)을 부르면, 그
+        // 스레드가 여전히 참조 중인 전역 rclcpp 컨텍스트를 발밑에서
+        // 뽑아버리는 것이다 -- 크래시하거나 프로세스가 끝나지 않는다.
+        // g_runtime을 reset()하지 않고 의도적으로 누수해 컨텍스트를
+        // 살려 둔다: 컨텍스트 누수는 살아남지만(메모리/핸들만 낭비),
+        // 살아있는 스레드 밑에서 컨텍스트를 뽑는 건 살아남지 못한다.
+        // 이미 위에서 비정상 상태임을 사용자에게 알렸다 -- 여기서 더
+        // 할 수 있는 안전한 정리는 없다. 프로세스 종료 시 OS가 정리한다.
+        return;
     }
 
     if (g_runtime) {
@@ -353,6 +365,23 @@ MStatus MaroStartBridgeCommand::doIt(const MArgList& args) {
     if (g_runtime && g_runtime->isRunning()) {
         MGlobal::displayWarning("Maro: bridge is already running.");
         return MS::kSuccess;
+    }
+
+    // I3.3: devkit 헤더(MPxThreadedDeviceNode.h, "NOTE" 근처)는 어트리뷰트
+    // 갱신이 유휴 이벤트 큐에 얹혀 있고, 그 큐가 배치 모드에서 돌지 않는다고
+    // 명시한다. 아래 강제 조회(있는 곳에 주석 참고)는 스레드를 한 번 킥할
+    // 뿐 그 큐를 대신하지 못하므로, 배치/헤드리스에서는 인바운드(ROS 2 ->
+    // Maya)가 절대 전달되지 않는다. 아웃바운드 발행은 MTimerMessage 기반이라
+    // 이 제약과 무관하고 테스트도 헤드리스로 그걸 검증하므로, 시작을
+    // 거부하지 않고 경고만 남긴다 -- 그래야 나중에 누가 처음부터 다시
+    // 디버깅하지 않는다.
+    if (MGlobal::mayaState() != MGlobal::kInteractive) {
+        MGlobal::displayWarning(
+            "Maro: Maya is not running interactively (batch/headless mode). "
+            "MPxThreadedDeviceNode relies on Maya's idle event queue for "
+            "attribute updates, and that queue does not run in this mode, "
+            "so inbound ROS 2 commands will NOT be delivered. Outbound "
+            "publishing is unaffected.");
     }
 
     g_runtime = std::make_unique<MaroRosRuntime>();
@@ -392,8 +421,35 @@ MStatus MaroStartBridgeCommand::doIt(const MArgList& args) {
     }
 
     MFnDependencyNode deviceFn(deviceObj);
+
+    // C1: 이 노드는 런타임 배관이지 사용자 데이터가 아니다. 표시해 두지
+    // 않으면 브리지를 켠 채로 씬을 저장했을 때 이 노드가 파일에 그대로
+    // 실린다. 다음에 그 씬을 열면 g_commandDeviceHandle은 빈 채로 시작하므로
+    // shutdownBridge()가 그 노드를 절대 찾지 못해 못 지우고, setRobotName()도
+    // 다시 불리지 않아 threadHandler()는 이름 없는 노드를 붙들고 영원히
+    // 돈다 -- 그리고 인스턴스가 남아 있으니 deregisterNode도 실패해
+    // 플러그인을 내릴 수 없다. 씬 저장 한 번으로 이 태스크가 고치려는
+    // "프로세스가 안 끝나는" 전례를 재현하는 셈이라, 실패해도 조용히
+    // 넘기지 않고 경고한다.
+    const MStatus doNotWriteStatus = deviceFn.setDoNotWrite(true);
+    if (!doNotWriteStatus) {
+        MGlobal::displayWarning(
+            "Maro: could not mark the command device node non-persistent; "
+            "it may be saved into the scene file.");
+    }
+
     auto* devicePtr = dynamic_cast<MaroCommandDeviceNode*>(deviceFn.userNode());
     if (devicePtr == nullptr) {
+        // I6: createModifier.doIt()가 이미 이 노드를 DG에 넣었고,
+        // g_commandDeviceHandle은 아직 세팅 전이다. 여기서 그냥 리턴하면
+        // shutdownBridge()가 이 노드를 절대 찾지 못해 인스턴스가 씬에 남고,
+        // C1과 같은 이유로 플러그인 언로드가 막힌다. 만든 걸 되돌린다.
+        const MStatus undoStatus = createModifier.undoIt();
+        if (!undoStatus) {
+            MGlobal::displayError(
+                "Maro: could not undo command device node creation; a "
+                "stray node may remain and block plugin unload.");
+        }
         MaroPump::stop();
         g_runtime->stop();
         g_runtime.reset();
@@ -419,17 +475,25 @@ MStatus MaroStartBridgeCommand::doIt(const MArgList& args) {
         return status;
     }
 
-    // devkit 문서(MPxThreadedDeviceNode.h)는 postConstructor()에서 등록한
-    // "refresh output attributes"가 유휴 큐를 통해 갱신된다고만 말하고,
-    // 그 첫 갱신이 어떻게 트리거되는지는 말하지 않는다. 실측 결과, DG는
-    // 지연 평가라 아무도 aCommandOut을 조회하지 않으면 (뷰포트가 도는
-    // 대화형 세션에서는 뷰포트 리프레시가 매 프레임 이걸 대신 해 준다)
-    // 백그라운드 스레드 자체가 시작되지 않는다 -- 뷰포트가 없는 배치/헤드리스
-    // 실행(자동화 파이프라인 등)에서는 아무도 그 역할을 대신하지 않는다.
-    // 대화형 여부에 기대지 않도록 여기서 한 번 직접 조회해 강제로 첫
-    // compute()를 끌어낸다. 이미 대화형 세션이라면 군더더기 호출 하나일 뿐
-    // 해가 없다.
-    deviceFn.findPlug(MaroCommandDeviceNode::aCommandOut, false).asBool();
+    // I3.1: 이 조회가 실제로 하는 일은 딱 하나다 -- DG의 지연 평가 규칙을
+    // 깨고 aCommandOut의 첫 compute()를 강제로 한 번 트리거해서, 그 안에서
+    // Maya가 백그라운드 스레드를 존재하게 만들도록 킥하는 것. 그게 전부다.
+    // 이후 반복 compute() 갱신 -- 즉 명령이 실제로 계속 흘러 들어오는 부분
+    // -- 은 이 호출과 무관하게 유휴(idle) 이벤트 큐가 담당하고, devkit
+    // 헤더가 명시하듯(MPxThreadedDeviceNode.h, "NOTE" 근처) 그 큐는 배치
+    // 모드에서 돌지 않는다. 그러므로 이 한 줄은 배치/헤드리스에서 인바운드
+    // 전달을 살리지 못한다 -- threadTicks가 0보다 커져서 위 배치 경고가
+    // 없다면 "건강해 보이지만 사실 죽어 있는" 상태를 만들 뿐이다.
+    // I3.2: 이 줄의 존재 이유 자체가 "안 그러면 조용히 실패한다"인데, 정작
+    // 이 줄 자체가 조용히 실패하면 안 되므로 MStatus를 받아 확인한다.
+    MStatus pullStatus;
+    deviceFn.findPlug(MaroCommandDeviceNode::aCommandOut, false).asBool(&pullStatus);
+    if (!pullStatus) {
+        MGlobal::displayWarning(
+            "Maro: could not force the command device's first compute(); "
+            "inbound delivery may not start until something else "
+            "re-evaluates the node.");
+    }
 
     MGlobal::displayInfo(MString("Maro: bridge running as '") + robotName + "'.");
     return MS::kSuccess;
