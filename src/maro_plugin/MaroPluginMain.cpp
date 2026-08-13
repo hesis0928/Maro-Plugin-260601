@@ -64,6 +64,15 @@ MStatus initializePlugin(MObject obj) {
     }
 
     status = plugin.registerCommand(
+        "maroSetControlMode",
+        maro::MaroSetControlModeCommand::creator,
+        maro::MaroSetControlModeCommand::newSyntax);
+    if (!status) {
+        status.perror("Maro: failed to register maroSetControlMode");
+        return status;
+    }
+
+    status = plugin.registerCommand(
         "maroConnectAxis",
         maro::MaroConnectAxisCommand::creator,
         maro::MaroConnectAxisCommand::newSyntax);
@@ -125,6 +134,7 @@ MStatus uninitializePlugin(MObject obj) {
     plugin.deregisterCommand("maroStopBridge");
     plugin.deregisterCommand("maroStartBridge");
     plugin.deregisterCommand("maroConnectAxis");
+    plugin.deregisterCommand("maroSetControlMode");
     plugin.deregisterCommand("maroBindAxis");
 
     plugin.deregisterNode(maro::MaroCommandDeviceNode::id);

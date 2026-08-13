@@ -24,6 +24,21 @@ private:
     bool m_stagedChange = false;
 };
 
+// 모드는 축에만 저장된다. 두 번째 진실 원천을 만들지 않는다.
+class MaroSetControlModeCommand : public MPxCommand {
+public:
+    static void* creator();
+    static MSyntax newSyntax();
+
+    MStatus doIt(const MArgList& args) override;
+    MStatus redoIt() override;
+    MStatus undoIt() override;
+    bool isUndoable() const override { return true; }
+
+private:
+    MDGModifier m_modifier;
+};
+
 // 축 체인 연결. 순환은 평가할 때 터지게 두지 않고 연결하는 순간 거부한다.
 class MaroConnectAxisCommand : public MPxCommand {
 public:

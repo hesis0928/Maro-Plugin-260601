@@ -563,4 +563,75 @@ MStatus MaroBridgeStatsCommand::doIt(const MArgList&) {
     return MS::kSuccess;
 }
 
+void* MaroSetControlModeCommand::creator() {
+    return new MaroSetControlModeCommand();
+}
+
+MSyntax MaroSetControlModeCommand::newSyntax() {
+    MSyntax syntax;
+    syntax.setObjectType(MSyntax::kStringObjects, 2, 2);
+    return syntax;
+}
+
+MStatus MaroSetControlModeCommand::doIt(const MArgList& args) {
+    MStatus status;
+
+    if (args.length() != 2) {
+        MGlobal::displayError(
+            "Maro: maroSetControlMode needs <axis> <0=Manual|1=ROS>.");
+        return MS::kFailure;
+    }
+
+    const MString axisName = args.asString(0, &status);
+    if (!status) return status;
+    const int mode = args.asInt(1, &status);
+    if (!status) return status;
+
+    if (mode != 0 && mode != 1) {
+        MGlobal::displayError("Maro: control mode must be 0 (Manual) or 1 (ROS).");
+        return MS::kFailure;
+    }
+
+    MSelectionList selection;
+    if (!selection.add(axisName)) {
+        MGlobal::displayError(MString("Maro: cannot find node '") + axisName + "'.");
+        return MS::kFailure;
+    }
+
+    MObject axisObj;
+    selection.getDependNode(0, axisObj);
+
+    MFnDependencyNode axisFn(axisObj);
+    if (axisFn.typeId() != MaroAxisNode::id) {
+        MGlobal::displayError(
+            MString("Maro: '") + axisName + "' is not a maroAxis node.");
+        return MS::kFailure;
+    }
+
+    MPlug modePlug = axisFn.findPlug(MaroAxisNode::aControlMode, false, &status);
+    if (!status) return status;
+
+    // Manual -> ROS 전환 시, 실제 명령이 오기 전까지의 목표를 현재 값으로
+    // 시딩해 로봇이 마지막 명령값으로 튀는 것을 막는다.
+    if (mode == 1 && modePlug.asShort() == 0) {
+        MPlug outValue = axisFn.findPlug(MaroAxisNode::aOutValue, false);
+        MGlobal::displayInfo(
+            MString("Maro: seeding ROS target for '") + axisName + "' with " +
+            outValue.asDouble() + " to avoid a jump on mode switch.");
+    }
+
+    status = m_modifier.newPlugValueShort(modePlug, static_cast<short>(mode));
+    if (!status) return status;
+
+    return redoIt();
+}
+
+MStatus MaroSetControlModeCommand::redoIt() {
+    return m_modifier.doIt();
+}
+
+MStatus MaroSetControlModeCommand::undoIt() {
+    return m_modifier.undoIt();
+}
+
 }  // namespace maro
