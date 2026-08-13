@@ -41,6 +41,9 @@ public:
 private:
     void spinLoop();
 
+    // 메인 스레드가 채운 샘플을 백그라운드에서 변환·발행한다.
+    void drainAndPublish();
+
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 

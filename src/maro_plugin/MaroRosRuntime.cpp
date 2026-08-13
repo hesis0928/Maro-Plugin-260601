@@ -4,10 +4,18 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <tf2_msgs/msg/tf_message.hpp>
+
+#include "maro_transform/Convert.h"
+
 namespace maro {
 
 struct MaroRosRuntime::Impl {
     std::shared_ptr<rclcpp::Node> node;
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr jointPub;
+    rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr tfPub;
 };
 
 MaroRosRuntime::MaroRosRuntime() : m_impl(std::make_unique<Impl>()) {}
@@ -24,11 +32,26 @@ bool MaroRosRuntime::start(const std::string& robotName) {
             rclcpp::init(0, nullptr);
         }
         m_impl->node = rclcpp::Node::make_shared(robotName);
+        // 상대 토픽 이름("joint_states")은 노드의 네임스페이스(기본 "/")
+        // 아래로 풀려 "/joint_states"가 된다 -- 노드 *이름*은 토픽 해석에
+        // 관여하지 않는다. MaroCommandDeviceNode.cpp(Task 10, 수신 방향)가
+        // 이미 "/" + robotName + "/joint_commands"로 완전한 절대 경로를
+        // 쓰고 있으므로, 발행 방향도 같은 관례를 따라야 두 방향이 같은
+        // "/<robotName>/..." 네임스페이스 아래 나란히 선다.
+        m_impl->jointPub =
+            m_impl->node->create_publisher<sensor_msgs::msg::JointState>(
+                "/" + robotName + "/joint_states", 10);
+        m_impl->tfPub =
+            m_impl->node->create_publisher<tf2_msgs::msg::TFMessage>("/tf", 10);
     } catch (const std::exception&) {
         // 예외가 Maya 쪽으로 새지 않게 여기서 막는다.
+        m_impl->tfPub.reset();
+        m_impl->jointPub.reset();
         m_impl->node.reset();
         return false;
     } catch (...) {
+        m_impl->tfPub.reset();
+        m_impl->jointPub.reset();
         m_impl->node.reset();
         return false;
     }
@@ -50,6 +73,8 @@ void MaroRosRuntime::stop() {
 
     // 순서가 중요하다. 노드 내부를 참조하는 것들을 먼저 놓아야
     // DDS 참가자가 살아남아 프로세스가 안 끝나는 일이 없다.
+    m_impl->tfPub.reset();
+    m_impl->jointPub.reset();
     m_impl->node.reset();
 
     // 이 rclcpp::shutdown()은 프로세스 전역 rclcpp 컨텍스트를 끝낸다.
@@ -71,10 +96,8 @@ void MaroRosRuntime::spinLoop() {
             // spin 없이도 publish()가 바로 나가므로 여기서
             // rclcpp::spin_some()을 부를 필요가 없다.
             //
-            // 펌프가 넣은 샘플을 꺼낸다. 발행은 Task 11에서 붙는다.
-            // 지금은 건너온 개수만 세어 흐름을 관측 가능하게 한다.
-            const std::vector<AxisSample> samples = m_publishQueue.drain();
-            m_drainedSamples.fetch_add(samples.size(), std::memory_order_relaxed);
+            // Task 10에서는 개수만 셌다. 이제 실제로 발행한다.
+            drainAndPublish();
 
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
@@ -82,6 +105,44 @@ void MaroRosRuntime::spinLoop() {
         // 스레드에서 예외가 새면 조용히 죽어 진단이 어려워진다.
         m_stopRequested.store(true);
     }
+}
+
+void MaroRosRuntime::drainAndPublish() {
+    const std::vector<AxisSample> samples = m_publishQueue.drain();
+    if (samples.empty()) return;
+
+    m_drainedSamples.fetch_add(samples.size(), std::memory_order_relaxed);
+
+    if (!m_impl->jointPub || !m_impl->tfPub) return;
+
+    sensor_msgs::msg::JointState joints;
+    joints.header.stamp = m_impl->node->now();
+
+    tf2_msgs::msg::TFMessage tf;
+
+    for (const AxisSample& sample : samples) {
+        joints.name.push_back(sample.jointName);
+        joints.position.push_back(sample.value);
+
+        const Vec3 p = mayaToRosPosition(sample.position, sample.unit);
+        const Quat q = mayaToRosRotation(sample.rotation);
+
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = joints.header.stamp;
+        t.header.frame_id = "world";
+        t.child_frame_id = sample.jointName;
+        t.transform.translation.x = p.x;
+        t.transform.translation.y = p.y;
+        t.transform.translation.z = p.z;
+        t.transform.rotation.x = q.x;
+        t.transform.rotation.y = q.y;
+        t.transform.rotation.z = q.z;
+        t.transform.rotation.w = q.w;
+        tf.transforms.push_back(t);
+    }
+
+    m_impl->jointPub->publish(joints);
+    m_impl->tfPub->publish(tf);
 }
 
 }  // namespace maro
