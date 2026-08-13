@@ -99,12 +99,19 @@ void MaroDeleteWatcher::onObjectAboutToDelete(MObject& node,
             MFnDependencyNode otherFn(other);
             if (otherFn.typeId() != MaroAxisNode::id) continue;
 
-            // 이 modifier에 실으면 삭제와 undo/redo가 함께 묶인다.
-            modifier.deleteNode(other);
-
             // 축 로케이터는 트랜스폼 밑에 셰이프로 생성된다. 셰이프만 지우면
-            // 빈 트랜스폼이 남으므로, 다른 자식이 없을 때만 같은 modifier에
-            // 얹어 함께 지운다.
+            // 빈 트랜스폼이 남으므로, 다른 자식이 없을 때만 부모 트랜스폼도
+            // 같은 modifier에 얹어 함께 지운다.
+            //
+            // 이 판단은 반드시 modifier.deleteNode(other)로 셰이프 삭제를
+            // 예약하기 전에 끝내야 한다. deleteNode()가 예약되고 나면
+            // MDagPath::getAPathTo(other, ...)는 여전히 kSuccess를 반환하지만
+            // 길이 0인 빈 경로를 내놓는다. 그 상태로 parentPath.pop()을
+            // 호출하면 매번 kInvalidParameter로 실패해 부모를 지우는 분기가
+            // 조건과 무관하게 절대 실행되지 않는다. 그래서 부모의 MDagPath와
+            // "자식이 하나뿐인가"라는 판단을 먼저 지역 변수(parentPath,
+            // deleteParent)에 담아 두고, 그 다음에 셰이프 삭제를 예약하고,
+            // 마지막으로 미리 계산해 둔 판단에 따라 부모 삭제를 예약한다.
             //
             // MFnDagNode를 MObject로 바로 생성하면 경로 컨텍스트가 없어
             // parentCount()/childCount()가 0을 반환한다 (MaroCommands.cpp의
@@ -112,15 +119,22 @@ void MaroDeleteWatcher::onObjectAboutToDelete(MObject& node,
             // 실제 경로를 먼저 얻어야 한다). 아래에서도 MFnDagNode를 반드시
             // parentPath(MDagPath)로 생성해야 하며, parentPath.node()로 얻은
             // 맨 MObject를 넘기면 같은 이유로 경로 컨텍스트를 잃는다.
+            MDagPath parentPath;
+            bool deleteParent = false;
             MDagPath shapePath;
             if (MDagPath::getAPathTo(other, shapePath) == MS::kSuccess) {
-                MDagPath parentPath = shapePath;
+                parentPath = shapePath;
                 if (parentPath.pop() == MS::kSuccess && parentPath.hasFn(MFn::kTransform)) {
                     MFnDagNode parentDag(parentPath);
-                    if (parentDag.childCount() == 1) {
-                        modifier.deleteNode(parentPath.node());
-                    }
+                    deleteParent = (parentDag.childCount() == 1);
                 }
+            }
+
+            // 이 modifier에 실으면 삭제와 undo/redo가 함께 묶인다.
+            modifier.deleteNode(other);
+
+            if (deleteParent) {
+                modifier.deleteNode(parentPath.node());
             }
 
             MGlobal::displayInfo(
