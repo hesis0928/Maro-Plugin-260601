@@ -33,7 +33,14 @@ public:
     // 설정
     static MObject aJointName;      // string
     static MObject aConventionAxis; // enum: 0=X 1=Y 2=Z
-    static MObject aConventionInvert;  // bool
+    static MObject aConventionInvert;  // bool -- v1에서는 compute()가 이
+                                        // 값을 읽지 않는다. 반전 보정은
+                                        // 구현되어 있지 않으며, 그래서
+                                        // MaroAxisNode.cpp::initialize()도
+                                        // 이 어트리뷰트를 attributeAffects의
+                                        // 소스 목록에서 뺐다 -- 안 읽는데
+                                        // 영향권에 넣으면 더티 전파만
+                                        // 낭비된다.
     static MObject aControlMode;    // enum: 0=Manual 1=ROS
     static MObject aRosCommand;     // double, ROS 모드에서의 기준값 (펌프가 씀)
     static MObject aEnabled;        // bool

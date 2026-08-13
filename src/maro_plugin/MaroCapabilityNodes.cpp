@@ -242,15 +242,23 @@ void* MaroSensorRangeNode::creator() { return new MaroSensorRangeNode(); }
 
 MStatus MaroSensorRangeNode::initialize() {
     MFnNumericAttribute numFn;
+    MFnUnitAttribute angFn;
 
     aRange = numFn.create("range", "rng", MFnNumericData::kDouble, 10.0);
     numFn.setStorable(true);
     numFn.setKeyable(true);
     addAttribute(aRange);
 
-    aConeAngle = numFn.create("coneAngle", "cna", MFnNumericData::kDouble, 0.5236);
-    numFn.setStorable(true);
-    numFn.setKeyable(true);
+    // Real angular unit, same convention as maroRotation.angle and the
+    // maroLimit min/max attributes: the Attribute Editor shows/accepts
+    // degrees while the data block stores radians. Previously this was a
+    // plain double carrying radians, so typing "30" here silently meant 30
+    // radians while the adjacent capability nodes meant 30 degrees. Nothing
+    // consumes this attribute yet, so there is no behavioral migration risk.
+    aConeAngle = angFn.create("coneAngle", "cna", MFnUnitAttribute::kAngle,
+                              0.5236);
+    angFn.setStorable(true);
+    angFn.setKeyable(true);
     addAttribute(aConeAngle);
 
     createCapabilityOut(out);
@@ -269,9 +277,13 @@ MStatus MaroSensorRangeNode::compute(const MPlug& plug, MDataBlock& data) {
 
         MDataHandle handle = data.outputValue(out.compound);
         handle.child(out.type).setShort(3);   // 3 = sensorRange
-        handle.child(out.minimum).set3Double(data.inputValue(aRange).asDouble(),
-                                             data.inputValue(aConeAngle).asDouble(),
-                                             0.0);
+        // .asAngle().asRadians() is explicit about the unit, same as
+        // maroRotation/maroLimit; the compound child it feeds (capMin.y) is
+        // a plain double carrying radians.
+        handle.child(out.minimum).set3Double(
+            data.inputValue(aRange).asDouble(),
+            data.inputValue(aConeAngle).asAngle().asRadians(),
+            0.0);
 
         data.setClean(plug);
         return MS::kSuccess;

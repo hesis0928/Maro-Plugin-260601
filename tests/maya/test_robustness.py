@@ -7,6 +7,7 @@
 다른 라이브 테스트들과 달리 try/finally로 감쌀 대상도 없다(비교:
 test_bridge_pump.py, test_contract.py, test_publish.py).
 """
+import math
 import os
 import sys
 
@@ -66,6 +67,18 @@ rot = cmds.createNode("maroRotation")
 cmds.connectAttr(rot + ".capabilityOut", axis + ".capabilityIn[0]")
 
 cmds.setAttr(rot + ".angle", float("inf"))
+# rot.angle은 MFnUnitAttribute::kAngle이다. setAttr(inf)가 실제로 inf를
+# 저장했는지 먼저 확인한다 -- Maya가 kAngle 어트리뷰트에서 inf를
+# 클램프하거나 거부한다면, 아래 outValue 유한성 검사는 애초에 유한한
+# 입력을 유한한 출력으로 통과시키는 것뿐이라 MaroAxisNode::compute()의
+# std::isfinite 가드를 지워도 이 테스트는 여전히 통과한다.
+angle_in = cmds.getAttr(rot + ".angle")
+assert math.isinf(angle_in) or math.isnan(angle_in), (
+    "setAttr did not actually store a non-finite value on rot.angle "
+    f"(got {angle_in}); the guard in MaroAxisNode::compute() could be "
+    "deleted and this scenario would still pass"
+)
+
 value = cmds.getAttr(axis + ".outValue")
 assert value == value, "outValue became NaN"
 assert abs(value) < 1e308, "outValue became infinite"

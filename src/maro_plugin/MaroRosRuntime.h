@@ -38,6 +38,12 @@ public:
     // 발행이 붙기 전에도 스레드 경계를 넘는 흐름을 관측할 수 있다.
     std::uint64_t drainedSampleCount() const { return m_drainedSamples.load(); }
 
+    // drainAndPublish()에서 예외가 나 한 틱을 건너뛴 횟수. spinLoop()의
+    // try가 while 바깥이 아니라 루프 안쪽(각 반복)을 감싸므로 예외가 나도
+    // 스레드는 계속 돌지만, 그 사실이 겉으로 안 보이면 "조용히 죽은 스레드"
+    // 와 구별이 안 된다 -- maroBridgeStats()로 밖에 노출해야 진단 가능하다.
+    std::uint64_t publishErrorCount() const { return m_publishErrors.load(); }
+
 private:
     void spinLoop();
 
@@ -51,6 +57,7 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stopRequested{false};
     std::atomic<std::uint64_t> m_drainedSamples{0};
+    std::atomic<std::uint64_t> m_publishErrors{0};
 
     BoundedQueue<AxisSample> m_publishQueue;
 };

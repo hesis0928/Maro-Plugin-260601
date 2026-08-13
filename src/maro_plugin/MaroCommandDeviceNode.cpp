@@ -163,7 +163,14 @@ std::uint64_t MaroCommandDeviceNode::threadTickCount() { return s_ticks.load(); 
 bool MaroCommandDeviceNode::isThreadAlive() { return s_threadAliveCount.load() > 0; }
 
 void MaroCommandDeviceNode::applyToMatchingAxis(const std::string& jointName, double value) {
-    // compute()에서만 불린다 -- 메인 스레드다. DG를 만지는 유일한 지점이다.
+    // compute()에서만 불린다. 이게 "메인 스레드에서만 불린다"는 보장은
+    // 아니다 -- Maya 2026 기본값인 Parallel Evaluation Manager 아래에서는
+    // compute()가 워커 스레드에서 돌 수 있다. 이 노드는 지금까지 Serial
+    // 평가를 가정하고 짜여 있고(코드는 여기서 안 바꾼다), 그 가정이 깨지는
+    // 시나리오는 아직 별도로 다루지 않았다는 뜻이다 -- 나중에 평가 관리자
+    // 관련 크래시를 디버깅할 사람이 "여기는 메인 스레드니까 안전하다"고
+    // 잘못 믿지 않게 남겨 둔다. DG를 만지는 유일한 지점이라는 점은 여전히
+    // 맞다.
     for (MItDependencyNodes it(MFn::kPluginLocatorNode); !it.isDone(); it.next()) {
         MFnDependencyNode axisFn(it.thisNode());
         if (axisFn.typeId() != MaroAxisNode::id) continue;

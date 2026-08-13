@@ -134,7 +134,11 @@ MStatus MaroAxisNode::initialize() {
     matFn.setWritable(false);
     addAttribute(aOutTransform);
 
-    for (const MObject& src : {aConventionAxis, aConventionInvert, aEnabled,
+    // aConventionInvert는 여기서 attributeAffects에 넣지 않는다: compute()가
+    // 실제로 읽지 않기 때문이다 (v1에는 반전 보정이 구현되어 있지 않다,
+    // MaroAxisNode.h의 선언부 주석 참고). 안 읽는 소스를 영향권에 넣으면
+    // 실제로는 아무 것도 안 바뀌는데 더티 전파만 유발해 재계산을 낭비한다.
+    for (const MObject& src : {aConventionAxis, aEnabled,
                                aControlMode, aRosCommand}) {
         attributeAffects(src, aOutValue);
         attributeAffects(src, aOutTransform);

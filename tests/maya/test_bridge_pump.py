@@ -60,9 +60,9 @@ cmds.connectAttr(rot + ".capabilityOut", axis + ".capabilityIn[0]")
 cmds.setAttr(rot + ".angle", 0.4)
 
 # 브리지를 켜기 전에는 아무것도 흐르지 않는다.
-collected, drained, applied, ticks = cmds.maroBridgeStats()
+collected, drained, applied, ticks, pub_errors = cmds.maroBridgeStats()
 assert collected == 0 and drained == 0 and ticks == 0, \
-    f"nothing should flow before the bridge starts: stats={(collected, drained, applied, ticks)}"
+    f"nothing should flow before the bridge starts: stats={(collected, drained, applied, ticks, pub_errors)}"
 print("idle stats OK")
 
 # M18: 이 시점부터 unloadPlugin까지가 "라이브" 구간이다 -- 브리지가 켜져
@@ -88,22 +88,24 @@ try:
     while time.time() < deadline:
         _qapp.processEvents()
         time.sleep(0.05)
-        collected, drained, applied, ticks = cmds.maroBridgeStats()
+        collected, drained, applied, ticks, pub_errors = cmds.maroBridgeStats()
         if collected > 0 and drained > 0 and ticks > 0:
             break
 
-    stats = (collected, drained, applied, ticks)
+    stats = (collected, drained, applied, ticks, pub_errors)
     assert collected > 0, f"pump never collected a sample from the DG (stats={stats})"
     assert drained > 0, f"samples never reached the background thread (stats={stats})"
     assert ticks > 0, \
         f"MaroCommandDeviceNode's thread never ticked -- native inbound thread " \
         f"did not come alive (stats={stats})"
+    assert pub_errors == 0, \
+        f"spinLoop() hit an exception while draining/publishing (stats={stats})"
     print(f"pump + command thread flow OK (collected={collected}, drained={drained}, ticks={ticks})")
 
     cmds.maroStopBridge()
-    collected_after, _, _, ticks_after = cmds.maroBridgeStats()
+    collected_after, _, _, ticks_after, _ = cmds.maroBridgeStats()
     _pump(1.0)
-    collected_now, _, _, ticks_now = cmds.maroBridgeStats()
+    collected_now, _, _, ticks_now, _ = cmds.maroBridgeStats()
     assert collected_now == collected_after, \
         f"pump kept running after maroStopBridge (before={collected_after}, after={collected_now})"
     assert ticks_now == ticks_after, \

@@ -58,11 +58,11 @@ def _wait_for_peer(proc, backstop_sec):
     관측한다. 고정 시간 sleep으로 "됐겠지" 하지 않는다 -- 관측 가능한 조건
     (피어의 종료)을 기다리고, 데드라인은 마지막 안전망일 뿐이다."""
     deadline = time.time() + backstop_sec
-    collected = drained = applied = ticks = 0
+    collected = drained = applied = ticks = pub_errors = 0
     while time.time() < deadline and proc.poll() is None:
         _qapp.processEvents()
         time.sleep(0.05)
-        collected, drained, applied, ticks = cmds.maroBridgeStats()
+        collected, drained, applied, ticks, pub_errors = cmds.maroBridgeStats()
 
     if proc.poll() is None:
         # 안전망 데드라인에 걸렸는데도 피어가 아직 살아있다 -- 정상 경로라면
@@ -71,7 +71,7 @@ def _wait_for_peer(proc, backstop_sec):
         proc.terminate()
 
     out, _ = proc.communicate(timeout=10)
-    return out, (collected, drained, applied, ticks)
+    return out, (collected, drained, applied, ticks, pub_errors)
 
 
 def main():

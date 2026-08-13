@@ -135,6 +135,17 @@ try:
     cmds.maroSetControlMode(axis, 1)
     assert cmds.getAttr(axis + ".controlMode") == 1, "maroSetControlMode did not flip controlMode"
 
+    # 시딩 검증: 모드 전환 직후, 새 명령이 아직 도착하기 전에는 outValue가
+    # Manual에서 가졌던 값 그대로여야 한다 -- maroSetControlMode가
+    # rosCommand를 현재 outValue로 시딩하지 않으면(또는 시딩 순서가
+    # 뒤바뀌면) 이 시점에 0(또는 이전 rosCommand의 stale 값)으로 튄다.
+    post_switch_out = cmds.getAttr(axis + ".outValue")
+    assert abs(post_switch_out - manual_out) < 1e-6, (
+        "axis jumped on mode switch instead of being seeded with its prior "
+        f"Manual value; manual_out={manual_out}, post_switch_out={post_switch_out}"
+    )
+    print("mode switch seeds rosCommand from outValue (no jump) OK")
+
     publish_command(1.2)
     delivered = wait_until(lambda: cmds.maroBridgeStats()[2] > applied_before, timeout=8)
     stats_after_attempt = cmds.maroBridgeStats()

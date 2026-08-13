@@ -89,8 +89,16 @@ void MaroRosRuntime::stop() {
 }
 
 void MaroRosRuntime::spinLoop() {
-    try {
-        while (!m_stopRequested.load() && rclcpp::ok()) {
+    // try는 while 몸통 하나만 감싼다 -- 루프 전체를 감싸면 drainAndPublish()
+    // 한 번의 예외로 루프를 완전히 빠져나가는데, m_running은 여전히
+    // true라서 maroStartBridge는 "already running"이라 하고
+    // maroBridgeStats 카운터는 그대로 멈춘 채 아무 로그도 안 남는다 --
+    // "조용히 죽은 스레드"가 크래시보다 진단하기 어렵다는 게 이 프로젝트의
+    // 설계 방침이다. MaroCommandDeviceNode::threadHandler()가 이미 같은
+    // 관례를 쓴다: 그쪽도 try를 루프 안쪽에 둬서 실패한 틱 하나가 스레드
+    // 전체를 끝내지 않게 한다.
+    while (!m_stopRequested.load() && rclcpp::ok()) {
+        try {
             // 이 노드는 퍼블리셔만 갖는다 — 구독은 MaroCommandDeviceNode
             // 쪽의 별도 노드가 처리한다 (Task 10 설계 노트). 퍼블리셔는
             // spin 없이도 publish()가 바로 나가므로 여기서
@@ -98,12 +106,13 @@ void MaroRosRuntime::spinLoop() {
             //
             // Task 10에서는 개수만 셌다. 이제 실제로 발행한다.
             drainAndPublish();
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } catch (...) {
+            // 이 틱은 건너뛰지만 스레드는 계속 돈다. 카운터로만 남기고
+            // 다음 반복에서 다시 시도한다.
+            m_publishErrors.fetch_add(1, std::memory_order_relaxed);
         }
-    } catch (...) {
-        // 스레드에서 예외가 새면 조용히 죽어 진단이 어려워진다.
-        m_stopRequested.store(true);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
 

@@ -77,7 +77,11 @@ public:
     static MTypeId id;
 
     static MObject aRange;           // double
-    static MObject aConeAngle;       // double, 라디안
+    static MObject aConeAngle;       // MFnUnitAttribute::kAngle (내부: 라디안) --
+                                      // maroRotation.angle/maroLimit min/max와
+                                      // 같은 관례. 예전엔 plain double(라디안)
+                                      // 이라 Attribute Editor에 30을 입력하면
+                                      // 30도가 아니라 30라디안으로 저장됐다.
     static CapabilityOutAttrs out;
 };
 

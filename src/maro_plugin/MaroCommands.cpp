@@ -441,9 +441,23 @@ MStatus MaroStartBridgeCommand::doIt(const MArgList& args) {
     }
     status = createModifier.doIt();
     if (!status) {
-        MaroPump::stop();
-        g_runtime->stop();
-        g_runtime.reset();
+        // 아래 devicePtr == nullptr 분기와 똑같은 경합이다: createNode()가
+        // 이미 호출됐으므로(doIt() 실패 여부와 무관하게) 디바이스 스레드가
+        // 이미 살아있을 수 있고, 여기서처럼 g_runtime->stop()을 직접 부르면
+        // 그 스레드 밑에서 rclcpp::shutdown()이 도는 경합 -- shutdownBridge()
+        // 가 폴링으로 막으려는 바로 그 상황 -- 을 재현한다. 만든 노드를
+        // undoIt()으로 먼저 되돌리고(안 그러면 노드가 씬에 남아 플러그인
+        // 언로드를 막는다), 나머지 정리는 shutdownBridge()에 맡긴다.
+        // g_commandDeviceHandle은 이 지점에서 아직 세팅되지 않았으므로
+        // shutdownBridge()의 "핸들로 노드 지우기" 단계는 아무 일도 하지
+        // 않는다 -- 중복 삭제가 아니다.
+        const MStatus undoStatus = createModifier.undoIt();
+        if (!undoStatus) {
+            MGlobal::displayError(
+                "Maro: could not undo command device node creation; a "
+                "stray node may remain and block plugin unload.");
+        }
+        shutdownBridge();
         MGlobal::displayError("Maro: could not add the command device node to the DG.");
         return status;
     }
@@ -560,6 +574,8 @@ MStatus MaroBridgeStatsCommand::doIt(const MArgList&) {
         g_runtime ? g_runtime->drainedSampleCount() : 0));
     stats.append(static_cast<int>(MaroCommandDeviceNode::appliedCommandCount()));
     stats.append(static_cast<int>(MaroCommandDeviceNode::threadTickCount()));
+    stats.append(static_cast<int>(
+        g_runtime ? g_runtime->publishErrorCount() : 0));
     setResult(stats);
     return MS::kSuccess;
 }
@@ -613,16 +629,26 @@ MStatus MaroSetControlModeCommand::doIt(const MArgList& args) {
     if (!status) return status;
 
     // Manual -> ROS 전환 시, 실제 명령이 오기 전까지의 목표를 현재 값으로
-    // 시딩해 로봇이 마지막 명령값으로 튀는 것을 막는다.
+    // 시딩해 로봇이 마지막 명령값으로 튀는 것을 막는다. 순서가 중요하다:
+    // outValue를 먼저 읽고 aRosCommand를 시딩한 다음에 모드를 바꿔야 한다.
+    // 반대로 하면 compute()가 이미 소스를 ROS로 바꾼 뒤라 0에서 시딩하게
+    // 된다.
     if (mode == 1 && modePlug.asShort() == 0) {
         MPlug outValue = axisFn.findPlug(MaroAxisNode::aOutValue, false);
         // outValue는 MFnUnitAttribute::kAngle이다. asDouble()로 읽으면 Maya가
         // UI 각도 단위(기본 도)로 변환한 값을 돌려줄 수 있어 로그가 실제
         // 라디안 값과 어긋난다. MaroPump.cpp가 같은 이유로 이미 asMAngle().
         // asRadians()를 쓰고 있다 -- 여기는 로그 전용이라 동작은 안 바뀐다.
+        const double seedValue = outValue.asMAngle().asRadians();
+
+        // 런타임 데이터 흐름이므로 직접 쓴다 (applyToMatchingAxis와 동일한
+        // 관례). undo 스택(m_modifier)에는 올리지 않는다 -- 이건 사용자
+        // 설정이 아니라 프레임 단위 런타임 시딩이다.
+        axisFn.findPlug(MaroAxisNode::aRosCommand, false).setDouble(seedValue);
+
         MGlobal::displayInfo(
             MString("Maro: seeding ROS target for '") + axisName + "' with " +
-            outValue.asMAngle().asRadians() + " to avoid a jump on mode switch.");
+            seedValue + " to avoid a jump on mode switch.");
     }
 
     status = m_modifier.newPlugValueShort(modePlug, static_cast<short>(mode));
