@@ -1,8 +1,9 @@
 #include "MaroDeleteWatcher.h"
 
+#include <maya/MDagPath.h>
 #include <maya/MDGMessage.h>
+#include <maya/MFnDagNode.h>
 #include <maya/MFnDependencyNode.h>
-#include <maya/MFnSet.h>
 #include <maya/MGlobal.h>
 #include <maya/MItDependencyNodes.h>
 #include <maya/MNodeMessage.h>
@@ -100,6 +101,26 @@ void MaroDeleteWatcher::onObjectAboutToDelete(MObject& node,
 
             // 이 modifier에 실으면 삭제와 undo/redo가 함께 묶인다.
             modifier.deleteNode(other);
+
+            // 축 로케이터는 트랜스폼 밑에 셰이프로 생성된다. 셰이프만 지우면
+            // 빈 트랜스폼이 남으므로, 다른 자식이 없을 때만 같은 modifier에
+            // 얹어 함께 지운다.
+            //
+            // MFnDagNode를 MObject로 바로 생성하면 경로 컨텍스트가 없어
+            // parentCount()/childCount()가 0을 반환한다 (MaroCommands.cpp의
+            // MaroBindAxisCommand::doIt과 동일하게 MDagPath::getAPathTo로
+            // 실제 경로를 먼저 얻어야 한다).
+            MDagPath shapePath;
+            if (MDagPath::getAPathTo(other, shapePath) == MS::kSuccess) {
+                MDagPath parentPath = shapePath;
+                if (parentPath.pop() == MS::kSuccess && parentPath.hasFn(MFn::kTransform)) {
+                    MFnDagNode parentDag(parentPath.node());
+                    if (parentDag.childCount() == 1) {
+                        modifier.deleteNode(parentPath.node());
+                    }
+                }
+            }
+
             MGlobal::displayInfo(
                 MString("Maro: deleting axis '") + otherFn.name() +
                 "' because its bound object was deleted.");
@@ -141,8 +162,16 @@ void MaroDeleteWatcher::onAxisAboutToDelete(MObject& node, MDGModifier& modifier
             }
 
             // 능력 노드는 삭제하지 않는다. 고아 세트에 담아 재사용 가능하게 둔다.
-            MFnSet setFn(setObj);
-            setFn.addMember(capNode);
+            //
+            // MFnSet::addMember()는 즉시 실행되며 modifier에 실리지 않아 undo
+            // 청크에서 빠진다. 대신 modifier에 실리는 MEL sets 커맨드로
+            // 멤버십을 걸어 축 삭제와 한 undo 청크로 묶는다.
+            MString cmd = "sets -edit -addElement \"";
+            cmd += kOrphanSetName;
+            cmd += "\" \"";
+            cmd += capFn.name();
+            cmd += "\";";
+            modifier.commandToExecute(cmd);
         }
 
         if (haveSet) {

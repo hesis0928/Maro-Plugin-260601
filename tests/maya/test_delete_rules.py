@@ -45,6 +45,49 @@ members = cmds.sets("maroOrphanSet", query=True) or []
 assert rot in members, f"orphan not registered in set: {members}"
 print("orphan OK")
 
+# 오브젝트를 지우면 축이 캐스케이드되고, 축에 물려 있던 능력 노드도
+# 고아 세트에 담긴다.
+cube3 = cmds.polyCube(name="seg3")[0]
+axis3 = cmds.createNode("maroAxis", name="axisC")
+cmds.maroBindAxis(axis3, cube3)
+rot3 = cmds.createNode("maroRotation", name="rotC")
+cmds.connectAttr(rot3 + ".capabilityOut", axis3 + ".capabilityIn[0]")
+
+cmds.delete(cube3)
+assert not cmds.objExists(axis3), "axis should cascade-delete with its object"
+assert cmds.objExists(rot3), "capability node must survive the cascade"
+members = cmds.sets("maroOrphanSet", query=True) or []
+assert rot3 in members, f"cascaded axis's capability node not orphaned: {members}"
+print("cascade plus orphan OK")
+
+# undo 하면 능력 노드는 복원된 축 스택에만 있어야 하고, 고아 세트에는
+# 더 이상 남아 있으면 안 된다. maroOrphanSet이 이미 존재하는 상태에서
+# 검증해야 한다 (세트 생성 자체가 undo로 함께 사라지면 버그가 가려진다).
+assert cmds.objExists("maroOrphanSet"), "orphan set must already exist for this check"
+cmds.undo()
+assert cmds.objExists(axis3), "axis should come back on undo"
+assert cmds.objExists(cube3), "object should come back on undo"
+stack_sources = cmds.listConnections(axis3 + ".capabilityIn[0]", source=True) or []
+assert rot3 in stack_sources, "capability node should be back in the restored axis stack"
+members = cmds.sets("maroOrphanSet", query=True) or []
+assert rot3 not in members, (
+    f"capability node still listed in maroOrphanSet after undo restored it "
+    f"to the axis stack: {members}"
+)
+print("undo restores orphan state OK")
+
+# 캐스케이드 삭제 후에는 빈 트랜스폼이 남지 않아야 한다.
+cube4 = cmds.polyCube(name="seg4")[0]
+axis4 = cmds.createNode("maroAxis", name="axisD")
+axis4_parent = cmds.listRelatives(axis4, parent=True, fullPath=True)[0]
+cmds.maroBindAxis(axis4, cube4)
+cmds.delete(cube4)
+assert not cmds.objExists(axis4), "axis should cascade-delete with its object"
+assert not cmds.objExists(axis4_parent), (
+    "empty parent transform should be deleted along with the axis shape"
+)
+print("no stray transform OK")
+
 # Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
 cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])
