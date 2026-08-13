@@ -1,4 +1,8 @@
-cmake_minimum_required(VERSION 3.20)
+# tests/CMakeLists.txt uses set_tests_properties(... ENVIRONMENT_MODIFICATION ...)
+# (path_list_prepend, to build PATH without shredding it on embedded
+# semicolons) -- that property was only added in CMake 3.22, so the floor
+# below must track that, not the older baseline this project started from.
+cmake_minimum_required(VERSION 3.22)
 project(maro LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
