@@ -88,6 +88,24 @@ assert not cmds.objExists(axis4_parent), (
 )
 print("no stray transform OK")
 
+# 부모 트랜스폼에 축 셰이프 말고 다른 자식이 남아 있으면, 캐스케이드 삭제가
+# 그 트랜스폼까지 지우면 안 된다 (다른 오브젝트가 함께 딸려 사라지면 안 됨).
+cube5 = cmds.polyCube(name="seg5")[0]
+axis5 = cmds.createNode("maroAxis", name="axisE")
+axis5_parent = cmds.listRelatives(axis5, parent=True, fullPath=True)[0]
+sibling = cmds.polyCube(name="seg5Sibling")[0]
+sibling = cmds.parent(sibling, axis5_parent)[0]
+cmds.maroBindAxis(axis5, cube5)
+cmds.delete(cube5)
+assert not cmds.objExists(axis5), "axis should still cascade-delete with its object"
+assert cmds.objExists(axis5_parent), (
+    "parent transform with another child must survive the cascade delete"
+)
+assert cmds.objExists(sibling), (
+    "the other child under the parent transform must not be swept away"
+)
+print("guard keeps shared parent transform OK")
+
 # Maya는 커스텀 노드 인스턴스가 씬에 남아 있으면 플러그인을 언로드하지 않는다.
 cmds.file(new=True, force=True)
 cmds.unloadPlugin(os.path.splitext(os.path.basename(plugin))[0])

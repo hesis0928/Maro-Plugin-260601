@@ -109,12 +109,14 @@ void MaroDeleteWatcher::onObjectAboutToDelete(MObject& node,
             // MFnDagNode를 MObject로 바로 생성하면 경로 컨텍스트가 없어
             // parentCount()/childCount()가 0을 반환한다 (MaroCommands.cpp의
             // MaroBindAxisCommand::doIt과 동일하게 MDagPath::getAPathTo로
-            // 실제 경로를 먼저 얻어야 한다).
+            // 실제 경로를 먼저 얻어야 한다). 아래에서도 MFnDagNode를 반드시
+            // parentPath(MDagPath)로 생성해야 하며, parentPath.node()로 얻은
+            // 맨 MObject를 넘기면 같은 이유로 경로 컨텍스트를 잃는다.
             MDagPath shapePath;
             if (MDagPath::getAPathTo(other, shapePath) == MS::kSuccess) {
                 MDagPath parentPath = shapePath;
                 if (parentPath.pop() == MS::kSuccess && parentPath.hasFn(MFn::kTransform)) {
-                    MFnDagNode parentDag(parentPath.node());
+                    MFnDagNode parentDag(parentPath);
                     if (parentDag.childCount() == 1) {
                         modifier.deleteNode(parentPath.node());
                     }
