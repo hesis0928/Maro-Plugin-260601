@@ -3,12 +3,18 @@
 #include <cmath>
 
 #include <maya/MAngle.h>
+#include <maya/MDagPath.h>
 #include <maya/MDistance.h>
 #include <maya/MFnDependencyNode.h>
 #include <maya/MGlobal.h>
 #include <maya/MItDependencyNodes.h>
+#include <maya/MMatrix.h>
 #include <maya/MPlug.h>
+#include <maya/MPlugArray.h>
+#include <maya/MQuaternion.h>
 #include <maya/MTimerMessage.h>
+#include <maya/MTransformationMatrix.h>
+#include <maya/MVector.h>
 
 #include "MaroAxisNode.h"
 #include "MaroRosRuntime.h"
@@ -109,6 +115,56 @@ void MaroPump::collectSamples(MaroRosRuntime& runtime) {
         sample.unit = unit;
 
         if (!std::isfinite(sample.value)) continue;
+
+        // /tf는 이 축이 구동하는 실제 Maya 오브젝트의 월드 변환이 있어야
+        // 의미가 있다. targetObject는 message 연결이라(데이터를 나르지
+        // 않는다) MaroBindAxisCommand::doIt과 같은 방식으로만 오브젝트를
+        // 얻을 수 있다 -- connectedTo(asDst=true)로 이 축에 연결된 소스
+        // 쪽(바인딩된 트랜스폼)을 본다. 바인딩이 없으면 이 축은 씬 안의
+        // 어떤 위치도 대표하지 않으므로, 이름 없는 축과 같은 이유로
+        // 건너뛴다 -- 원점(identity)을 발행하는 것보다는 아예 발행하지
+        // 않는 쪽이 낫다 (이 태스크가 고치는 바로 그 문제).
+        MPlugArray targetSources;
+        axisFn.findPlug(MaroAxisNode::aTargetObject, false)
+            .connectedTo(targetSources, true, false);
+        if (targetSources.length() == 0) continue;
+
+        // MFnDagNode를 MObject로 바로 생성하면 경로 컨텍스트를 잃어
+        // parentCount()/월드 행렬 조회가 조용히 틀어진다 -- 이미
+        // MaroBindAxisCommand::doIt(MaroCommands.cpp)과
+        // MaroDeleteWatcher.cpp에서 같은 함정에 걸렸다. MDagPath::getAPathTo로
+        // 실제 경로를 얻어야 inclusiveMatrix()가 조상 체인을 포함한 진짜
+        // 월드 행렬을 돌려준다.
+        MDagPath targetPath;
+        if (MDagPath::getAPathTo(targetSources[0].node(), targetPath) !=
+            MS::kSuccess) {
+            continue;
+        }
+
+        // /tf 프레임은 전부 공통 루트("world") 기준으로 발행되므로(
+        // MaroRosRuntime::drainAndPublish 참고) 로컬이 아니라 월드 행렬을
+        // 쓴다. 스케일/기울임은 이 파이프라인이 다루지 않으므로 kTransform
+        // 공간으로 평행이동을, rotation()으로 회전만 뽑아낸다 -- 둘 다
+        // Maya가 순수 행렬에서 피벗 없이 성분을 복원하는 표준 경로다.
+        const MMatrix worldMatrix = targetPath.inclusiveMatrix();
+        MTransformationMatrix xform(worldMatrix);
+
+        MStatus translationStatus;
+        const MVector t =
+            xform.getTranslation(MSpace::kTransform, &translationStatus);
+        const MQuaternion q = xform.rotation();
+
+        // 이 값들은 백그라운드 스레드를 거쳐 그대로 ROS 2 와이어로 나간다.
+        // NaN/inf가 거기까지 새지 않도록 여기서 막는다 (sample.value에 이미
+        // 적용한 것과 같은 가드).
+        const Vec3 position{t.x, t.y, t.z};
+        const Quat rotation{q.x, q.y, q.z, q.w};
+        if (!translationStatus || !isFinite(position) || !isFinite(rotation)) {
+            continue;
+        }
+
+        sample.position = position;
+        sample.rotation = rotation;
 
         runtime.publishQueue().push(std::move(sample));
         s_collected.fetch_add(1, std::memory_order_relaxed);

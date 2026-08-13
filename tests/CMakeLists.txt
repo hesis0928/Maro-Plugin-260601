@@ -33,6 +33,12 @@ if(MARO_BUILD_PLUGIN)
     foreach(ros_lib rclcpp rcl rcutils rcpputils rmw rosidl_runtime_c
                     rosidl_typesupport_cpp
                     sensor_msgs__rosidl_typesupport_cpp
+                    # /tf 모드가 구독하는 tf2_msgs/msg/TFMessage는
+                    # geometry_msgs/msg/TransformStamped를 담는다. 플러그인
+                    # 쪽(src/maro_plugin/CMakeLists.txt)이 이미 이 둘을 같은
+                    # 이유로 링크하고 있다.
+                    geometry_msgs__rosidl_typesupport_cpp
+                    tf2_msgs__rosidl_typesupport_cpp
                     builtin_interfaces__rosidl_typesupport_cpp
                     # rclcpp의 토픽 통계 기능(SubscriptionTopicStatistics)이
                     # 이 둘을 끌어온다. 브리프의 링크 목록에는 없었지만 링크
