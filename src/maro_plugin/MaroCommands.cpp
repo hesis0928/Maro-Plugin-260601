@@ -4,6 +4,7 @@
 #include <memory>
 #include <thread>
 
+#include <maya/MAngle.h>
 #include <maya/MArgList.h>
 #include <maya/MDagPath.h>
 #include <maya/MFnDependencyNode.h>
@@ -615,9 +616,13 @@ MStatus MaroSetControlModeCommand::doIt(const MArgList& args) {
     // 시딩해 로봇이 마지막 명령값으로 튀는 것을 막는다.
     if (mode == 1 && modePlug.asShort() == 0) {
         MPlug outValue = axisFn.findPlug(MaroAxisNode::aOutValue, false);
+        // outValue는 MFnUnitAttribute::kAngle이다. asDouble()로 읽으면 Maya가
+        // UI 각도 단위(기본 도)로 변환한 값을 돌려줄 수 있어 로그가 실제
+        // 라디안 값과 어긋난다. MaroPump.cpp가 같은 이유로 이미 asMAngle().
+        // asRadians()를 쓰고 있다 -- 여기는 로그 전용이라 동작은 안 바뀐다.
         MGlobal::displayInfo(
             MString("Maro: seeding ROS target for '") + axisName + "' with " +
-            outValue.asDouble() + " to avoid a jump on mode switch.");
+            outValue.asMAngle().asRadians() + " to avoid a jump on mode switch.");
     }
 
     status = m_modifier.newPlugValueShort(modePlug, static_cast<short>(mode));
